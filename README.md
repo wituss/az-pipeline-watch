@@ -8,9 +8,8 @@ releases, or bypass checks and permissions.
 
 ## Requirements
 
-- Linux or macOS with `stty` for interactive terminal controls.
-- Windows builds support noninteractive use, such as `--once` and `--list-stages`.
-  Interactive modes require `stty`, which is not included with standard Windows.
+- Linux, Windows, or macOS. Interactive controls use `crossterm`; no `stty`
+  executable is required.
 - Azure CLI with the Azure DevOps extension and an authenticated account with
   access to the build. Approvals require the appropriate Azure DevOps permissions.
 - Stable Rust and a C linker if building from source.
@@ -80,11 +79,12 @@ az-pipeline-watch
 
 Enter the build URL, then use Up/Down to navigate, Space to select stages,
 and Enter to continue. Type `approve` to confirm; `q` or Escape cancels selection.
-Only stages with currently actionable approvals can be selected. The build must
+Stages may be selected before their approvals become available. The build must
 be in progress.
 
-This mode submits available approvals for the selected stages once, then exits.
-It does not wait for approvals that may appear later.
+After confirmation, this mode monitors the run and submits approvals as they
+become available for the selected stages. Use `--once` to check only once or
+`--dry-run` to preview without submitting approvals.
 
 ### Approve through a stage
 

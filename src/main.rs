@@ -25,7 +25,7 @@ use std::{
 
 use args::{Args, Target};
 use azure::Azure;
-use controls::{TerminalInput, adjust_interval};
+use controls::{Key, TerminalInput, adjust_interval};
 use display::{list_stages, render_refresh_interval};
 use interactive::{confirm_selection, prompt_for_url, select_stages};
 use policy::Policy;
@@ -40,7 +40,7 @@ fn run() -> Result<()> {
         prompt_for_url()?
     };
     let target = Target::parse(&url)?;
-    let policy = Policy::from_args(&args);
+    let mut policy = Policy::from_args(&args);
     let api = Azure {
         target,
         timeout: Duration::from_secs(args.request_timeout),
@@ -59,19 +59,7 @@ fn run() -> Result<()> {
             println!("Approval cancelled.");
             return Ok(());
         }
-        let policy = Policy::Selected(selected);
-        cycle(
-            &api,
-            &policy,
-            args.dry_run,
-            false,
-            0,
-            false,
-            &mut HashSet::new(),
-            &session,
-            &AtomicBool::new(false),
-        )?;
-        return Ok(());
+        policy = Policy::Selected(selected);
     }
     if args.list_stages {
         return list_stages(&api, &mut std::io::stdout().lock());
@@ -117,15 +105,23 @@ fn run() -> Result<()> {
                 break;
             }
             if show_controls {
-                for key in terminal_input.read_keys()? {
-                    if key == b'r' || key == b'R' {
+                if let Some(key) = terminal_input.read_key(Duration::ZERO)? {
+                    if key == Key::Cancel {
+                        stopped.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    if matches!(key, Key::Other('r' | 'R')) {
                         refresh_now = true;
                         break;
                     }
-                    if let Some(adjusted) = adjust_interval(interval, key) {
-                        interval = adjusted;
-                        next_refresh = Instant::now() + Duration::from_secs(interval);
-                        render_refresh_interval(interval)?;
+                    if let Key::Other(key) = key {
+                        if key.is_ascii() {
+                            if let Some(adjusted) = adjust_interval(interval, key as u8) {
+                                interval = adjusted;
+                                next_refresh = Instant::now() + Duration::from_secs(interval);
+                                render_refresh_interval(interval)?;
+                            }
+                        }
                     }
                 }
             }
@@ -141,6 +137,7 @@ fn run() -> Result<()> {
             continue;
         }
     }
+    drop(terminal_input);
     println!("Monitoring stopped.");
     Ok(())
 }

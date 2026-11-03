@@ -75,7 +75,7 @@ fn cli_defaults_to_no_approvals_and_rejects_conflicting_flags() {
 fn terminal_refresh_clears_screen_but_logs_remain_plain_text() {
     let mut terminal = Vec::new();
     render_frame(&mut terminal, "pipeline status\n", true).unwrap();
-    assert_eq!(&terminal, b"\x1b[2J\x1b[Hpipeline status\n");
+    assert_eq!(&terminal, b"\x1b[2J\x1b[1;1Hpipeline status\n");
 
     let mut log = Vec::new();
     render_frame(&mut log, "pipeline status\n", false).unwrap();

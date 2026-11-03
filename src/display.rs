@@ -1,4 +1,9 @@
 use anyhow::Result;
+use crossterm::{
+    cursor::MoveTo,
+    queue,
+    terminal::{Clear, ClearType, is_raw_mode_enabled},
+};
 use std::io::Write;
 
 use crate::{azure::Api, model::approval_stages};
@@ -60,18 +65,23 @@ pub(crate) fn render_frame(
     refresh_screen: bool,
 ) -> Result<()> {
     if refresh_screen {
-        output.write_all(b"\x1b[2J\x1b[H")?;
+        queue!(output, Clear(ClearType::All), MoveTo(0, 0))?;
     }
-    output.write_all(frame.as_bytes())?;
+    if is_raw_mode_enabled()? {
+        output.write_all(frame.replace('\n', "\r\n").as_bytes())?;
+    } else {
+        output.write_all(frame.as_bytes())?;
+    }
     output.flush()?;
     Ok(())
 }
 
 pub(crate) fn render_refresh_interval(interval: u64) -> Result<()> {
     let mut output = std::io::stdout().lock();
+    queue!(output, MoveTo(0, 2), Clear(ClearType::CurrentLine))?;
     write!(
         output,
-        "\x1b[3;1H\x1b[2KRefresh interval: {interval}s | r refresh, + faster, - slower, Ctrl-C exit"
+        "Refresh interval: {interval}s | r refresh, + faster, - slower, Ctrl-C exit"
     )?;
     output.flush()?;
     Ok(())

@@ -1,12 +1,14 @@
 use anyhow::{Context, Result, ensure};
-use std::collections::VecDeque;
-use std::{
-    io::{IsTerminal, Read},
-    process::{Command, Stdio},
+use crossterm::{
+    cursor::{Hide, Show},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode},
 };
+use std::{io::IsTerminal, time::Duration};
 
 pub(crate) struct TerminalInput {
-    original_settings: Option<String>,
+    enabled: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -16,126 +18,71 @@ pub(crate) enum Key {
     Toggle,
     Confirm,
     Cancel,
-    Other(u8),
+    Other(char),
 }
 
-pub(crate) fn next_key(input: &mut VecDeque<u8>) -> Option<Key> {
-    let first = *input.front()?;
-    if first == 0x1b {
-        if input.len() < 3 {
-            return None;
-        }
-        input.pop_front();
-        if input.pop_front() != Some(b'[') {
-            return Some(Key::Other(0x1b));
-        }
-        return match input.pop_front() {
-            Some(b'A') => Some(Key::Up),
-            Some(b'B') => Some(Key::Down),
-            Some(_) => Some(Key::Other(0x1b)),
-            None => None,
+fn decode_key(event: KeyEvent) -> Option<Key> {
+    if event.kind == KeyEventKind::Release {
+        return None;
+    }
+    if event.modifiers.contains(KeyModifiers::CONTROL) {
+        return match event.code {
+            KeyCode::Char('c' | 'C') => Some(Key::Cancel),
+            _ => None,
         };
     }
-    input.pop_front();
-    match first {
-        b' ' => Some(Key::Toggle),
-        b'\r' | b'\n' => Some(Key::Confirm),
-        b'q' | b'Q' => Some(Key::Cancel),
-        key => Some(Key::Other(key)),
+    match event.code {
+        KeyCode::Up => Some(Key::Up),
+        KeyCode::Down => Some(Key::Down),
+        KeyCode::Char(' ') => Some(Key::Toggle),
+        KeyCode::Enter => Some(Key::Confirm),
+        KeyCode::Esc | KeyCode::Char('q' | 'Q') => Some(Key::Cancel),
+        KeyCode::Char(key) => Some(Key::Other(key)),
+        _ => None,
     }
 }
 
 impl TerminalInput {
     pub(crate) fn new(enabled: bool) -> Result<Self> {
-        if !enabled {
-            return Ok(Self {
-                original_settings: None,
-            });
+        if enabled {
+            ensure!(
+                std::io::stdin().is_terminal(),
+                "Interactive controls require a terminal on stdin"
+            );
+            enable_raw_mode().context("Cannot enable terminal raw mode")?;
         }
-
-        ensure!(
-            std::io::stdin().is_terminal(),
-            "Interactive controls require a terminal on stdin"
-        );
-        let output = Command::new("stty")
-            .arg("-g")
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::piped())
-            .output()
-            .context("Cannot read terminal settings using stty")?;
-        ensure!(
-            output.status.success(),
-            "stty -g failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        let original_settings = String::from_utf8(output.stdout)
-            .context("stty returned invalid terminal settings")?
-            .trim()
-            .to_owned();
-        ensure!(
-            !original_settings.is_empty(),
-            "stty returned empty settings"
-        );
-
-        let status = Command::new("stty")
-            .args(["-icanon", "-echo", "min", "0", "time", "0"])
-            .status()
-            .context("Cannot enable interactive keyboard input using stty")?;
-        ensure!(
-            status.success(),
-            "stty could not enable interactive keyboard input"
-        );
-        Ok(Self {
-            original_settings: Some(original_settings),
-        })
+        let terminal = Self { enabled };
+        if enabled {
+            execute!(std::io::stdout(), Hide).context("Cannot hide terminal cursor")?;
+        }
+        Ok(terminal)
     }
 
     pub(crate) fn enabled(&self) -> bool {
-        self.original_settings.is_some()
+        self.enabled
     }
 
-    pub(crate) fn read_keys(&self) -> Result<Vec<u8>> {
-        if !self.enabled() {
-            return Ok(Vec::new());
+    pub(crate) fn read_key(&self, timeout: Duration) -> Result<Option<Key>> {
+        if !self.enabled || !event::poll(timeout).context("Cannot poll terminal input")? {
+            return Ok(None);
         }
-        let mut buffer = [0; 32];
-        let count = std::io::stdin()
-            .read(&mut buffer)
-            .context("Cannot read keyboard input")?;
-        Ok(buffer[..count].to_vec())
+        match event::read().context("Cannot read terminal input")? {
+            Event::Key(key) => Ok(decode_key(key)),
+            _ => Ok(None),
+        }
     }
 }
 
 impl Drop for TerminalInput {
     fn drop(&mut self) {
-        let Some(settings) = &self.original_settings else {
-            return;
-        };
-        match Command::new("stty").arg(settings).status() {
-            Ok(status) if status.success() => {}
-            Ok(status) => eprintln!("Warning: could not restore terminal settings ({status})"),
-            Err(error) => eprintln!("Warning: could not restore terminal settings: {error}"),
+        if self.enabled {
+            if let Err(error) = disable_raw_mode() {
+                eprintln!("Warning: could not restore terminal settings: {error}");
+            }
+            if let Err(error) = execute!(std::io::stdout(), Show) {
+                eprintln!("Warning: could not restore terminal cursor: {error}");
+            }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decodes_arrow_and_selection_keys_without_dropping_partial_sequences() {
-        let mut bytes = VecDeque::from([0x1b, b'[']);
-        assert_eq!(next_key(&mut bytes), None);
-        bytes.push_back(b'A');
-        assert_eq!(next_key(&mut bytes), Some(Key::Up));
-        assert_eq!(
-            next_key(&mut VecDeque::from([0x1b, b'[', b'B'])),
-            Some(Key::Down)
-        );
-        assert_eq!(next_key(&mut VecDeque::from([b' '])), Some(Key::Toggle));
-        assert_eq!(next_key(&mut VecDeque::from([b'\r'])), Some(Key::Confirm));
-        assert_eq!(next_key(&mut VecDeque::from([b'q'])), Some(Key::Cancel));
     }
 }
 
@@ -144,5 +91,42 @@ pub(crate) fn adjust_interval(interval: u64, key: u8) -> Option<u64> {
         b'+' | b'=' => Some(interval.saturating_sub(5).max(1)),
         b'-' => Some(interval.saturating_add(5).min(3600)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_navigation_selection_and_cancel_events() {
+        for (code, expected) in [
+            (KeyCode::Up, Key::Up),
+            (KeyCode::Down, Key::Down),
+            (KeyCode::Char(' '), Key::Toggle),
+            (KeyCode::Enter, Key::Confirm),
+            (KeyCode::Esc, Key::Cancel),
+            (KeyCode::Char('q'), Key::Cancel),
+            (KeyCode::Char('+'), Key::Other('+')),
+        ] {
+            assert_eq!(
+                decode_key(KeyEvent::new(code, KeyModifiers::NONE)),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            decode_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(Key::Cancel)
+        );
+    }
+
+    #[test]
+    fn ignores_key_releases_to_avoid_double_toggles_on_windows() {
+        let event = KeyEvent::new_with_kind(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+        assert_eq!(decode_key(event), None);
     }
 }

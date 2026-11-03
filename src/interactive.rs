@@ -1,14 +1,15 @@
 use anyhow::{Result, ensure};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as FmtWrite,
     io::{IsTerminal, Write},
-    thread,
     time::Duration,
 };
 
 use crate::{
     azure::Api,
-    controls::{Key, TerminalInput, next_key},
+    controls::{Key, TerminalInput},
+    display::render_frame,
     model::{Record, approval_stages},
 };
 
@@ -67,10 +68,9 @@ fn render_choices(
     cursor: usize,
     output: &mut impl Write,
 ) -> Result<()> {
-    write!(
-        output,
-        "\x1b[2J\x1b[HSelect stages to approve\n↑/↓ move  Space select  Enter continue  q cancel\n\n"
-    )?;
+    let mut frame = String::from(
+        "Select stages to approve\nUp/Down move  Space select  Enter continue  q/Esc/Ctrl-C cancel\n\n",
+    );
     for (index, stage) in stages.iter().enumerate() {
         let marker = if selected.contains(&stage.id) {
             "[x]"
@@ -78,12 +78,12 @@ fn render_choices(
             "[ ]"
         };
         let availability = if stage.actionable_approvals == 0 {
-            "no actionable approvals".to_owned()
+            "no approvals available yet".to_owned()
         } else {
             format!("{} approval(s) available", stage.actionable_approvals)
         };
         writeln!(
-            output,
+            frame,
             "{} {marker} {:<24} {:<12} {:<28} {}",
             if index == cursor { ">" } else { " " },
             stage.id,
@@ -92,7 +92,7 @@ fn render_choices(
             stage.name
         )?;
     }
-    output.flush()?;
+    render_frame(output, &frame, true)?;
     Ok(())
 }
 
@@ -114,36 +114,17 @@ pub(crate) fn select_stages(api: &impl Api) -> Result<Option<BTreeSet<String>>> 
         .iter()
         .position(|stage| stage.actionable_approvals > 0)
         .unwrap_or(0);
-    let mut pending = VecDeque::new();
     loop {
         render_choices(&stages, &selected, cursor, &mut std::io::stdout().lock())?;
-        let mut escape_started = None;
         let key = loop {
-            if let Some(key) = next_key(&mut pending) {
+            if let Some(key) = terminal.read_key(Duration::from_millis(100))? {
                 break key;
             }
-            let bytes = terminal.read_keys()?;
-            if !bytes.is_empty() {
-                pending.extend(bytes);
-                if pending.front() == Some(&0x1b) {
-                    escape_started.get_or_insert_with(std::time::Instant::now);
-                }
-                continue;
-            }
-            if pending.front() == Some(&0x1b)
-                && escape_started.is_some_and(|start: std::time::Instant| {
-                    start.elapsed() >= Duration::from_millis(120)
-                })
-            {
-                pending.pop_front();
-                break Key::Cancel;
-            }
-            thread::sleep(Duration::from_millis(20));
         };
         match key {
             Key::Up => cursor = cursor.saturating_sub(1),
             Key::Down => cursor = (cursor + 1).min(stages.len() - 1),
-            Key::Toggle if stages[cursor].actionable_approvals > 0 => {
+            Key::Toggle => {
                 let id = stages[cursor].id.clone();
                 if !selected.remove(&id) {
                     selected.insert(id);
@@ -155,7 +136,7 @@ pub(crate) fn select_stages(api: &impl Api) -> Result<Option<BTreeSet<String>>> 
                 }
             }
             Key::Cancel => return Ok(None),
-            Key::Toggle | Key::Other(_) => {}
+            Key::Other(_) => {}
         }
     }
 }
