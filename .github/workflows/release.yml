@@ -1,0 +1,116 @@
+name: Build, test and release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-master
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - name: Bump patch version
+        id: version
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          manifest_path = Path("Cargo.toml")
+          manifest = manifest_path.read_text()
+          package = tomllib.loads(manifest)["package"]
+          current = package["version"]
+          if not re.fullmatch(r"\d+\.\d+\.\d+", current):
+              raise SystemExit(f"Expected a stable semantic version, got {current}")
+          versions = [tuple(map(int, current.split(".")))]
+          for tag in subprocess.check_output(["git", "tag", "--list"], text=True).splitlines():
+              if re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+                  versions.append(tuple(map(int, tag[1:].split("."))))
+          major, minor, patch = max(versions)
+          version = f"{major}.{minor}.{patch + 1}"
+
+          def replace_package_version(text, section):
+              pattern = (
+                  rf'(?ms)(^\[{section}\]\s*\n'
+                  rf'(?:(?!^\[).)*?^version = "){re.escape(current)}(")'
+              )
+              updated, count = re.subn(pattern, rf"\g<1>{version}\2", text, count=1)
+              if count != 1:
+                  raise SystemExit(f"Could not update version in {section}")
+              return updated
+
+          manifest_path.write_text(replace_package_version(manifest, "package"))
+          lock_path = Path("Cargo.lock")
+          lock = lock_path.read_text()
+          pattern = (
+              rf'(?m)(^\[\[package\]\]\nname = "{re.escape(package["name"])}"\n'
+              rf'version = "){re.escape(current)}(")'
+          )
+          lock, count = re.subn(pattern, rf"\g<1>{version}\2", lock, count=1)
+          if count != 1:
+              raise SystemExit("Could not update package version in Cargo.lock")
+          lock_path.write_text(lock)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"tag=v{version}\n")
+          PY
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Test
+        run: cargo test --locked --release
+
+      - name: Build
+        run: cargo build --locked --release
+
+      - name: Package Linux x86_64 binary
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          mkdir -p dist
+          archive="az-pipeline-watch-${TAG}-linux-x86_64.tar.gz"
+          tar -czf "dist/${archive}" -C target/release az-pipeline-watch
+          (cd dist && sha256sum "${archive}" > "${archive}.sha256")
+
+      - name: Commit version and push tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "Release ${TAG} [skip ci]"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push --atomic origin HEAD:master "refs/tags/${TAG}"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "${TAG}" dist/* \
+            --verify-tag \
+            --title "${TAG}" \
+            --generate-notes
