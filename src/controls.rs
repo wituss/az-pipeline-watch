@@ -59,6 +59,7 @@ impl TerminalInput {
         );
         let output = Command::new("stty")
             .arg("-g")
+            .stdin(Stdio::inherit())
             .stdout(Stdio::piped())
             .output()
             .context("Cannot read terminal settings using stty")?;
