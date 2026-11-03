@@ -117,29 +117,45 @@ pub(crate) fn select_stages(api: &impl Api) -> Result<Option<BTreeSet<String>>> 
     let mut pending = VecDeque::new();
     loop {
         render_choices(&stages, &selected, cursor, &mut std::io::stdout().lock())?;
-        if let Some(key) = next_key(&mut pending) {
-            match key {
-                Key::Up => cursor = cursor.saturating_sub(1),
-                Key::Down => cursor = (cursor + 1).min(stages.len() - 1),
-                Key::Toggle if stages[cursor].actionable_approvals > 0 => {
-                    let id = stages[cursor].id.clone();
-                    if !selected.remove(&id) {
-                        selected.insert(id);
-                    }
-                }
-                Key::Confirm => {
-                    if !selected.is_empty() {
-                        return Ok(Some(selected));
-                    }
-                }
-                Key::Cancel => return Ok(None),
-                Key::Toggle | Key::Other(_) => {}
+        let mut escape_started = None;
+        let key = loop {
+            if let Some(key) = next_key(&mut pending) {
+                break key;
             }
-        } else {
-            pending.extend(terminal.read_keys()?);
-            if pending.is_empty() {
-                thread::sleep(Duration::from_millis(50));
+            let bytes = terminal.read_keys()?;
+            if !bytes.is_empty() {
+                pending.extend(bytes);
+                if pending.front() == Some(&0x1b) {
+                    escape_started.get_or_insert_with(std::time::Instant::now);
+                }
+                continue;
             }
+            if pending.front() == Some(&0x1b)
+                && escape_started.is_some_and(|start: std::time::Instant| {
+                    start.elapsed() >= Duration::from_millis(120)
+                })
+            {
+                pending.pop_front();
+                break Key::Cancel;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        match key {
+            Key::Up => cursor = cursor.saturating_sub(1),
+            Key::Down => cursor = (cursor + 1).min(stages.len() - 1),
+            Key::Toggle if stages[cursor].actionable_approvals > 0 => {
+                let id = stages[cursor].id.clone();
+                if !selected.remove(&id) {
+                    selected.insert(id);
+                }
+            }
+            Key::Confirm => {
+                if !selected.is_empty() {
+                    return Ok(Some(selected));
+                }
+            }
+            Key::Cancel => return Ok(None),
+            Key::Toggle | Key::Other(_) => {}
         }
     }
 }
@@ -152,10 +168,30 @@ pub(crate) fn show_selection(selected: &BTreeSet<String>) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn confirm_selection(selected: &BTreeSet<String>) -> Result<bool> {
+    show_selection(selected)?;
+    print!("Type 'approve' to submit these approvals, or anything else to cancel: ");
+    std::io::stdout().flush()?;
+    let mut response = String::new();
+    std::io::stdin().read_line(&mut response)?;
+    Ok(is_approval_confirmation(&response))
+}
+
+fn is_approval_confirmation(response: &str) -> bool {
+    response.trim().eq_ignore_ascii_case("approve")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn approval_confirmation_requires_explicit_approval_token() {
+        assert!(is_approval_confirmation(" approve \n"));
+        assert!(!is_approval_confirmation("yes"));
+        assert!(!is_approval_confirmation(""));
+    }
 
     #[test]
     fn stage_choices_follow_timeline_and_only_mark_stages_with_approvals() {

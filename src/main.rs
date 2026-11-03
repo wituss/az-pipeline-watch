@@ -27,7 +27,7 @@ use args::{Args, Target};
 use azure::Azure;
 use controls::{TerminalInput, adjust_interval};
 use display::{list_stages, render_refresh_interval};
-use interactive::{prompt_for_url, select_stages, show_selection};
+use interactive::{confirm_selection, prompt_for_url, select_stages};
 use policy::Policy;
 use watch::cycle;
 
@@ -45,12 +45,32 @@ fn run() -> Result<()> {
         target,
         timeout: Duration::from_secs(args.request_timeout),
     };
+    let session = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    );
     if interactive {
         let Some(selected) = select_stages(&api)? else {
             println!("Selection cancelled.");
             return Ok(());
         };
-        show_selection(&selected)?;
+        if !confirm_selection(&selected)? {
+            println!("Approval cancelled.");
+            return Ok(());
+        }
+        let policy = Policy::Selected(selected);
+        cycle(
+            &api,
+            &policy,
+            args.dry_run,
+            false,
+            0,
+            false,
+            &mut HashSet::new(),
+            &session,
+            &AtomicBool::new(false),
+        )?;
         return Ok(());
     }
     if args.list_stages {
@@ -62,11 +82,6 @@ fn run() -> Result<()> {
     let stopped = Arc::new(AtomicBool::new(false));
     let signal = Arc::clone(&stopped);
     ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))?;
-    let session = format!(
-        "{}-{}",
-        std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    );
     let mut submitted = HashSet::new();
     let mut interval = args.interval;
     while !stopped.load(Ordering::Relaxed) {

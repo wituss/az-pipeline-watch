@@ -7,6 +7,7 @@ use crate::{args::Args, model::Record};
 pub(crate) enum Policy {
     None,
     All,
+    Selected(BTreeSet<String>),
     Through(String),
 }
 
@@ -31,6 +32,13 @@ impl Policy {
             all.len() == stages.len(),
             "Duplicate stage IDs in this build's timeline"
         );
+        if let Self::Selected(selected) = self {
+            ensure!(
+                selected.is_subset(&all),
+                "A selected stage is missing from this build's timeline"
+            );
+            return Ok(selected.clone());
+        }
         if let Self::Through(target) = self {
             ensure!(
                 stages.iter().any(|(stage, _)| stage == target),

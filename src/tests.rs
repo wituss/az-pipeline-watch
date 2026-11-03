@@ -32,6 +32,22 @@ fn approve_through_selects_pipeline_order_and_validates_target() {
 }
 
 #[test]
+fn selected_policy_only_approves_selected_stages_and_rejects_stale_selection() {
+    let selected = BTreeSet::from(["QA".to_owned()]);
+    assert_eq!(
+        Policy::Selected(selected.clone())
+            .selected_stages(&records())
+            .unwrap(),
+        selected
+    );
+    assert!(
+        Policy::Selected(BTreeSet::from(["Removed".to_owned()]))
+            .selected_stages(&records())
+            .is_err()
+    );
+}
+
+#[test]
 fn cli_defaults_to_no_approvals_and_rejects_conflicting_flags() {
     let url = "https://dev.azure.com/org/project/_build/results?buildId=1";
     assert!(Args::try_parse_from(["watch"]).unwrap().url.is_none());
@@ -250,6 +266,23 @@ fn through_writes_stages_in_order_and_verifies_vote_without_repeating() {
         ]
     );
     assert_eq!(submitted.len(), 4);
+}
+
+#[test]
+fn selected_policy_writes_only_selected_stage_approvals() {
+    let api = Fake::default();
+    let mut submitted = HashSet::new();
+    tick(
+        &api,
+        &Policy::Selected(BTreeSet::from(["QA".to_owned()])),
+        false,
+        &mut submitted,
+    )
+    .unwrap();
+    assert_eq!(
+        api.writes.borrow().keys().cloned().collect::<Vec<_>>(),
+        ["QA-approval"]
+    );
 }
 
 #[test]
