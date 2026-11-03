@@ -12,10 +12,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  version:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,6 +75,44 @@ jobs:
               output.write(f"tag=v{version}\n")
           PY
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: version-manifests
+          path: |
+            Cargo.toml
+            Cargo.lock
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            binary: az-pipeline-watch
+          - os: windows-latest
+            platform: windows-x86_64
+            binary: az-pipeline-watch.exe
+          - os: macos-latest
+            platform: macos-arm64
+            binary: az-pipeline-watch
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: version-manifests
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -84,18 +122,61 @@ jobs:
       - name: Build
         run: cargo build --locked --release
 
-      - name: Package Linux x86_64 binary
+      - name: Package binary and checksum
         env:
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ needs.version.outputs.tag }}
+          PLATFORM: ${{ matrix.platform }}
+          BINARY: ${{ matrix.binary }}
         run: |
-          mkdir -p dist
-          archive="az-pipeline-watch-${TAG}-linux-x86_64.tar.gz"
-          tar -czf "dist/${archive}" -C target/release az-pipeline-watch
-          (cd dist && sha256sum "${archive}" > "${archive}.sha256")
+          python - <<'PY'
+          import hashlib
+          import os
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          dist = Path("dist")
+          dist.mkdir()
+          binary = Path("target/release") / os.environ["BINARY"]
+          name = f"az-pipeline-watch-{os.environ['TAG']}-{os.environ['PLATFORM']}"
+          if binary.suffix == ".exe":
+              archive = dist / f"{name}.zip"
+              with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
+                  package.write(binary, arcname=binary.name)
+          else:
+              archive = dist / f"{name}.tar.gz"
+              with tarfile.open(archive, "w:gz") as package:
+                  package.add(binary, arcname=binary.name)
+          checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+          Path(f"{archive}.sha256").write_text(f"{checksum}  {archive.name}\n")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: version-manifests
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
 
       - name: Commit version and push tag
         env:
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -108,7 +189,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
           gh release create "${TAG}" dist/* \
             --verify-tag \

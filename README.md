@@ -8,7 +8,9 @@ releases, or bypass checks and permissions.
 
 ## Requirements
 
-- Linux with `stty` for interactive terminal controls.
+- Linux or macOS with `stty` for interactive terminal controls.
+- Windows builds support noninteractive use, such as `--once` and `--list-stages`.
+  Interactive modes require `stty`, which is not included with standard Windows.
 - Azure CLI with the Azure DevOps extension and an authenticated account with
   access to the build. Approvals require the appropriate Azure DevOps permissions.
 - Stable Rust and a C linker if building from source.
@@ -20,7 +22,8 @@ az login
 
 ## Install
 
-Download a Linux x86_64 archive from [Releases](https://github.com/wituss/az-pipeline-watch/releases),
+Download a Linux x86_64, Windows x86_64, or macOS Apple Silicon (arm64) archive
+from [Releases](https://github.com/wituss/az-pipeline-watch/releases),
 extract it, and place the executable on your `PATH`. Each archive includes a
 separate SHA-256 checksum file.
 
@@ -127,5 +130,8 @@ cargo build --locked --release
 Pushes to `master` trigger GitHub Actions. The workflow increments the highest
 stable version found in `Cargo.toml` or Git tags by one patch, updates the
 manifest and lockfile, checks formatting, runs tests, and builds the binary.
-Only after success does it commit the version bump, push a `vX.Y.Z` tag, and
-publish a GitHub Release with a Linux x86_64 archive and checksum.
+Builds and tests run on Linux x86_64, Windows x86_64, and macOS arm64.
+Only after all platforms succeed does it commit the version bump, push a
+`vX.Y.Z` tag, and publish a GitHub Release with archives and checksums for
+all three platforms. Windows binaries are packaged as ZIP files; Linux and
+macOS binaries use tar.gz archives.
