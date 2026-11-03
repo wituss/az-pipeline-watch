@@ -1,5 +1,6 @@
 mod args;
 mod azure;
+mod controls;
 mod display;
 mod model;
 mod policy;
@@ -23,7 +24,8 @@ use std::{
 
 use args::{Args, Target};
 use azure::Azure;
-use display::list_stages;
+use controls::{TerminalInput, adjust_interval};
+use display::{list_stages, render_refresh_interval};
 use policy::Policy;
 use watch::cycle;
 
@@ -39,6 +41,8 @@ fn run() -> Result<()> {
         return list_stages(&api, &mut std::io::stdout().lock());
     }
     let refresh_screen = !args.once && std::io::stdout().is_terminal();
+    let terminal_input = TerminalInput::new(refresh_screen && std::io::stdin().is_terminal())?;
+    let show_controls = refresh_screen && terminal_input.enabled();
     let stopped = Arc::new(AtomicBool::new(false));
     let signal = Arc::clone(&stopped);
     ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))?;
@@ -48,12 +52,15 @@ fn run() -> Result<()> {
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     );
     let mut submitted = HashSet::new();
+    let mut interval = args.interval;
     while !stopped.load(Ordering::Relaxed) {
         let build = cycle(
             &api,
             &policy,
             args.dry_run,
             refresh_screen,
+            interval,
+            show_controls,
             &mut submitted,
             &session,
             &stopped,
@@ -72,12 +79,35 @@ fn run() -> Result<()> {
         if args.once {
             return Ok(());
         }
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(args.interval) {
+        let mut next_refresh = Instant::now() + Duration::from_secs(interval);
+        let mut refresh_now = false;
+        while Instant::now() < next_refresh {
             if stopped.load(Ordering::Relaxed) {
                 break;
             }
-            thread::sleep(Duration::from_millis(100));
+            if show_controls {
+                for key in terminal_input.read_keys()? {
+                    if key == b'r' || key == b'R' {
+                        refresh_now = true;
+                        break;
+                    }
+                    if let Some(adjusted) = adjust_interval(interval, key) {
+                        interval = adjusted;
+                        next_refresh = Instant::now() + Duration::from_secs(interval);
+                        render_refresh_interval(interval)?;
+                    }
+                }
+            }
+            if refresh_now {
+                break;
+            }
+            thread::sleep(
+                Duration::from_millis(100)
+                    .min(next_refresh.saturating_duration_since(Instant::now())),
+            );
+        }
+        if refresh_now {
+            continue;
         }
     }
     println!("Monitoring stopped.");

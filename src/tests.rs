@@ -10,6 +10,7 @@ use std::{
 use crate::{
     args::{Args, Target},
     azure::Api,
+    controls::adjust_interval,
     display::{list_stages, render_frame},
     model::{Approval, Build, Record, Step, approval_stages},
     policy::Policy,
@@ -62,6 +63,16 @@ fn terminal_refresh_clears_screen_but_logs_remain_plain_text() {
     let mut log = Vec::new();
     render_frame(&mut log, "pipeline status\n", false).unwrap();
     assert_eq!(&log, b"pipeline status\n");
+}
+
+#[test]
+fn keyboard_changes_refresh_interval_in_five_second_steps() {
+    assert_eq!(adjust_interval(30, b'+'), Some(25));
+    assert_eq!(adjust_interval(30, b'='), Some(25));
+    assert_eq!(adjust_interval(30, b'-'), Some(35));
+    assert_eq!(adjust_interval(3, b'+'), Some(1));
+    assert_eq!(adjust_interval(3600, b'-'), Some(3600));
+    assert_eq!(adjust_interval(30, b'r'), None);
 }
 
 #[test]
@@ -195,6 +206,8 @@ fn tick(
         policy,
         dry_run,
         false,
+        30,
+        false,
         submitted,
         "test",
         &AtomicBool::new(false),
@@ -248,6 +261,8 @@ fn all_can_include_production_but_stopping_prevents_writes() {
         &api,
         &Policy::All,
         false,
+        false,
+        30,
         false,
         &mut HashSet::new(),
         "test",

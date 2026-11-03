@@ -17,6 +17,8 @@ pub(crate) fn cycle(
     policy: &Policy,
     dry_run: bool,
     refresh_screen: bool,
+    refresh_interval: u64,
+    show_controls: bool,
     submitted: &mut HashSet<String>,
     session: &str,
     stopped: &AtomicBool,
@@ -34,6 +36,13 @@ pub(crate) fn cycle(
         build.result.as_deref().unwrap_or("-")
     )
     .expect("writing to a String cannot fail");
+    if show_controls {
+        writeln!(
+            output,
+            "Refresh interval: {refresh_interval}s | r refresh, + faster, - slower, Ctrl-C exit"
+        )
+        .expect("writing to a String cannot fail");
+    }
     let mut stages: Vec<_> = records.iter().filter(|r| r.kind == "Stage").collect();
     stages.sort_by_key(|r| r.order);
     for stage in stages {

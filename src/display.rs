@@ -66,3 +66,13 @@ pub(crate) fn render_frame(
     output.flush()?;
     Ok(())
 }
+
+pub(crate) fn render_refresh_interval(interval: u64) -> Result<()> {
+    let mut output = std::io::stdout().lock();
+    write!(
+        output,
+        "\x1b[3;1H\x1b[2KRefresh interval: {interval}s | r refresh, + faster, - slower, Ctrl-C exit"
+    )?;
+    output.flush()?;
+    Ok(())
+}
