@@ -1,48 +1,67 @@
 """Run with: python3 tests/terminal_integration.py [path/to/az-pipeline-watch].
 
-Uses a POSIX pseudo-terminal and a local az double, never the real Azure CLI.
+Uses ConPTY on Windows or POSIX PTY elsewhere, and a local az double.
 """
 
 import errno
-import fcntl
 import json
 import os
 from pathlib import Path
-import pty
 import select
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
-import termios
 import time
 import unittest
+
+if os.name == "nt":
+    from winpty import PtyProcess
+    from winpty.enums import Backend
+else:
+    import fcntl
+    import pty
+    import termios
 
 
 BINARY = Path(sys.argv.pop(1) if len(sys.argv) > 1 else
               "target/release/az-pipeline-watch").resolve()
 URL = b"https://dev.azure.com/org/project/_build/results?buildId=123\n"
 
+WINDOWS_MOCK = None
+
 
 class TerminalSession:
     def __init__(self, *flags, api_error=False):
         self.directory = tempfile.TemporaryDirectory(prefix="watch-integration-")
         self.root = Path(self.directory.name)
-        mock = self.root / "az"
-        shutil.copyfile(Path(__file__).parent / "fixtures" / "az", mock)
-        mock.chmod(0o755)
-        self.master, self.slave = pty.openpty()
-        fcntl.ioctl(self.slave, termios.TIOCSWINSZ,
-                    struct.pack("HHHH", 30, 140, 0, 0))
-        self.settings = termios.tcgetattr(self.slave)
+        fixture = (Path(__file__).parent / "fixtures" / "az").resolve()
+        if os.name == "nt":
+            shutil.copyfile(WINDOWS_MOCK, self.root / "az.exe")
+        else:
+            mock = self.root / "az"
+            shutil.copyfile(fixture, mock)
+            mock.chmod(0o755)
         env = dict(os.environ, PATH=f"{self.root}{os.pathsep}{os.environ['PATH']}",
                    WATCH_TEST_STATE=str(self.root),
+                   WATCH_TEST_PYTHON=sys.executable,
+                   WATCH_TEST_AZ_SCRIPT=str(fixture),
                    WATCH_TEST_API_ERROR="1" if api_error else "0")
-        self.process = subprocess.Popen(
-            [str(BINARY), *flags], stdin=self.slave, stdout=self.slave,
-            stderr=self.slave, env=env, close_fds=True,
-        )
+        if os.name == "nt":
+            self.process = PtyProcess.spawn(
+                [str(BINARY), *flags], env=env, dimensions=(40, 200),
+                backend=Backend.ConPTY,
+            )
+        else:
+            self.master, self.slave = pty.openpty()
+            fcntl.ioctl(self.slave, termios.TIOCSWINSZ,
+                        struct.pack("HHHH", 40, 200, 0, 0))
+            self.settings = termios.tcgetattr(self.slave)
+            self.process = subprocess.Popen(
+                [str(BINARY), *flags], stdin=self.slave, stdout=self.slave,
+                stderr=self.slave, env=env, close_fds=True,
+            )
         self.output = bytearray()
         self.position = 0
 
@@ -51,7 +70,9 @@ class TerminalSession:
 
     def __exit__(self, *_):
         try:
-            if self.process.poll() is None:
+            if os.name == "nt":
+                self.process.close(force=True)
+            elif self.process.poll() is None:
                 self.process.terminate()
                 try:
                     self.process.wait(timeout=3)
@@ -59,14 +80,30 @@ class TerminalSession:
                     self.process.kill()
                     self.process.wait(timeout=3)
         finally:
-            os.close(self.master)
-            os.close(self.slave)
+            if os.name != "nt":
+                os.close(self.master)
+                os.close(self.slave)
             self.directory.cleanup()
 
+    def alive(self):
+        if os.name == "nt":
+            return self.process.isalive()
+        return self.process.poll() is None
+
     def send(self, data):
-        os.write(self.master, data)
+        if os.name == "nt":
+            self.process.write(data.decode().replace("\n", "\r"))
+        else:
+            os.write(self.master, data)
 
     def read(self, timeout=0.1):
+        if os.name == "nt":
+            if select.select([self.process.fileobj], [], [], timeout)[0]:
+                try:
+                    self.output.extend(self.process.read(65536).encode())
+                except EOFError:
+                    pass
+            return
         if select.select([self.master], [], [], timeout)[0]:
             try:
                 self.output.extend(os.read(self.master, 65536))
@@ -103,15 +140,16 @@ class TerminalSession:
 
     def finish(self, expected_code=0):
         deadline = time.monotonic() + 15
-        while self.process.poll() is None and time.monotonic() < deadline:
+        while self.alive() and time.monotonic() < deadline:
             self.read()
-        if self.process.poll() is None:
+        if self.alive():
             raise AssertionError("Process did not exit")
-        while select.select([self.master], [], [], 0.1)[0]:
-            self.read(0)
-        if self.process.returncode != expected_code:
+        # Drain the final frame; ConPTY output is forwarded asynchronously.
+        self.read(0.2)
+        code = self.process.exitstatus if os.name == "nt" else self.process.returncode
+        if code != expected_code:
             raise AssertionError(self.output.decode(errors="replace"))
-        if termios.tcgetattr(self.slave) != self.settings:
+        if os.name != "nt" and termios.tcgetattr(self.slave) != self.settings:
             raise AssertionError("Terminal settings were not restored")
         if b"\x1b[?25l" not in self.output or b"\x1b[?25h" not in self.output:
             raise AssertionError("Cursor was not hidden and restored")
@@ -192,4 +230,14 @@ class TerminalIntegrationTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    if os.name == "nt":
+        with tempfile.TemporaryDirectory(prefix="watch-mock-build-") as directory:
+            WINDOWS_MOCK = Path(directory) / "az.exe"
+            subprocess.run([
+                "rustc", str(Path(__file__).parent / "fixtures" / "az.rs"),
+                "-o", str(WINDOWS_MOCK),
+            ], check=True)
+            result = unittest.main(verbosity=2, exit=False).result
+        sys.exit(0 if result.wasSuccessful() else 1)
+    else:
+        unittest.main(verbosity=2)

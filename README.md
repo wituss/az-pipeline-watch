@@ -128,8 +128,11 @@ cargo build --locked --release
 python3 tests/terminal_integration.py target/release/az-pipeline-watch
 ```
 
-Terminal integration tests run on Linux and macOS using a pseudo-terminal and a
-local Azure CLI double. They do not contact Azure or submit real approvals.
+Terminal integration tests run on all three platforms using POSIX PTY on Linux
+and macOS, or ConPTY through `pywinpty` on Windows, with a local Azure CLI double.
+On Windows, install the test dependencies with
+`python -m pip install -r tests/requirements.txt` before running the tests.
+They do not contact Azure or submit real approvals.
 They cover selection, delayed approval availability, confirmation, dry-run,
 cancellation, API errors, keyboard controls, and terminal restoration.
 
