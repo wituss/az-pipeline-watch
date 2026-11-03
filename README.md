@@ -125,7 +125,13 @@ calls (default: 120 seconds). Run `az-pipeline-watch --help` for all options.
 cargo fmt --check
 cargo test --locked --release
 cargo build --locked --release
+python3 tests/terminal_integration.py target/release/az-pipeline-watch
 ```
+
+Terminal integration tests run on Linux and macOS using a pseudo-terminal and a
+local Azure CLI double. They do not contact Azure or submit real approvals.
+They cover selection, delayed approval availability, confirmation, dry-run,
+cancellation, API errors, keyboard controls, and terminal restoration.
 
 Pushes to `master` trigger GitHub Actions. The workflow increments the highest
 stable version found in `Cargo.toml` or Git tags by one patch, updates the

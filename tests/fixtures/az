@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Local Azure CLI double. No network calls or real credentials are used."""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+
+root = Path(os.environ["WATCH_TEST_STATE"])
+args = sys.argv[1:]
+resource = args[args.index("--resource") + 1]
+with (root / "calls.jsonl").open("a") as log:
+    log.write(json.dumps(args) + "\n")
+
+if resource == "builds":
+    response = {"id": 123, "status": "inProgress", "result": None}
+elif resource == "timeline":
+    counter = root / "timeline-count"
+    count = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(count))
+    if count > 1 and os.environ.get("WATCH_TEST_API_ERROR") == "1":
+        print("Simulated Azure API failure", file=sys.stderr)
+        sys.exit(1)
+    records = []
+    for order, stage in enumerate(("Build", "UAT", "PRD"), 1):
+        records.append({
+            "id": stage, "identifier": stage, "name": stage,
+            "type": "Stage", "state": "pending", "order": order,
+        })
+        # Approvals appear only after the interactive selection query.
+        if count > 1 and stage != "Build":
+            records.extend([
+                {"id": f"{stage}-check", "parentId": stage, "name": "Check",
+                 "type": "Checkpoint", "state": "inProgress"},
+                {"id": f"{stage}-approval", "parentId": f"{stage}-check",
+                 "name": "Approval", "type": "Checkpoint.Approval",
+                 "state": "inProgress"},
+            ])
+    response = {"records": records}
+elif resource == "approvals":
+    votes = root / "votes.jsonl"
+    if "--http-method" in args:
+        assert args[args.index("--http-method") + 1] == "PATCH"
+        body = json.loads(Path(args[args.index("--in-file") + 1]).read_text())
+        with votes.open("a") as log:
+            log.write(json.dumps(body) + "\n")
+        response = {"value": body}
+    else:
+        approval_id = next(arg.split("=", 1)[1] for arg in args
+                           if arg.startswith("approvalIds="))
+        submitted = []
+        if votes.exists():
+            submitted = [vote for line in votes.read_text().splitlines()
+                         for vote in json.loads(line)]
+        approved = any(vote["approvalId"] == approval_id for vote in submitted)
+        response = {"value": [{
+            "id": approval_id, "status": "approved" if approved else "pending",
+            "permissions": "view, update", "steps": [],
+        }]}
+else:
+    print(f"Unexpected API resource: {resource}", file=sys.stderr)
+    sys.exit(1)
+
+print(json.dumps(response))

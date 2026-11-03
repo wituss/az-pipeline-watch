@@ -122,6 +122,10 @@ jobs:
       - name: Build
         run: cargo build --locked --release
 
+      - name: Terminal integration tests
+        if: runner.os != 'Windows'
+        run: python3 tests/terminal_integration.py target/release/az-pipeline-watch
+
       - name: Package binary and checksum
         env:
           TAG: ${{ needs.version.outputs.tag }}
