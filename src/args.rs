@@ -9,8 +9,8 @@ use url::Url;
     after_help = "By default NO approvals are submitted. Only environment/check approvals are supported,\nnot ManualValidation tasks or classic releases. Other checks and permissions are never bypassed.\n\nExamples:\n  az-pipeline-watch 'https://dev.azure.com/ORG/PROJECT/_build/results?buildId=123'\n  az-pipeline-watch URL --approve-through Stage_uat --dry-run\n  az-pipeline-watch URL --approve-all --dry-run\n\n--approve-through approves stages in timeline order through the named stage, inclusive.\nThe command fails if the named stage does not exist in this build's timeline.\nStages before the boundary are selected by pipeline order, not inferred dependencies;\nparallel stages before it may also be selected. Later stages are not approved."
 )]
 pub(crate) struct Args {
-    /// Build results URL (quote it if it contains '&')
-    pub(crate) url: String,
+    /// Build results URL (quote it if it contains '&'); omit for interactive mode
+    pub(crate) url: Option<String>,
     /// Seconds between completed polling cycles
     #[arg(long, default_value = "30", value_parser = clap::value_parser!(u64).range(1..))]
     pub(crate) interval: u64,

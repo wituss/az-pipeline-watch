@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, ensure};
+use std::collections::VecDeque;
 use std::{
     io::{IsTerminal, Read},
     process::{Command, Stdio},
@@ -6,6 +7,42 @@ use std::{
 
 pub(crate) struct TerminalInput {
     original_settings: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Key {
+    Up,
+    Down,
+    Toggle,
+    Confirm,
+    Cancel,
+    Other(u8),
+}
+
+pub(crate) fn next_key(input: &mut VecDeque<u8>) -> Option<Key> {
+    let first = *input.front()?;
+    if first == 0x1b {
+        if input.len() < 3 {
+            return None;
+        }
+        input.pop_front();
+        if input.pop_front() != Some(b'[') {
+            return Some(Key::Other(0x1b));
+        }
+        return match input.pop_front() {
+            Some(b'A') => Some(Key::Up),
+            Some(b'B') => Some(Key::Down),
+            Some(_) => Some(Key::Other(0x1b)),
+            None => None,
+        };
+    }
+    input.pop_front();
+    match first {
+        b' ' => Some(Key::Toggle),
+        b'\r' | b'\n' => Some(Key::Confirm),
+        b'q' | b'Q' => Some(Key::Cancel),
+        key => Some(Key::Other(key)),
+    }
 }
 
 impl TerminalInput {
@@ -78,6 +115,26 @@ impl Drop for TerminalInput {
             Ok(status) => eprintln!("Warning: could not restore terminal settings ({status})"),
             Err(error) => eprintln!("Warning: could not restore terminal settings: {error}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_arrow_and_selection_keys_without_dropping_partial_sequences() {
+        let mut bytes = VecDeque::from([0x1b, b'[']);
+        assert_eq!(next_key(&mut bytes), None);
+        bytes.push_back(b'A');
+        assert_eq!(next_key(&mut bytes), Some(Key::Up));
+        assert_eq!(
+            next_key(&mut VecDeque::from([0x1b, b'[', b'B'])),
+            Some(Key::Down)
+        );
+        assert_eq!(next_key(&mut VecDeque::from([b' '])), Some(Key::Toggle));
+        assert_eq!(next_key(&mut VecDeque::from([b'\r'])), Some(Key::Confirm));
+        assert_eq!(next_key(&mut VecDeque::from([b'q'])), Some(Key::Cancel));
     }
 }
 

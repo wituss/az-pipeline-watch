@@ -34,6 +34,7 @@ fn approve_through_selects_pipeline_order_and_validates_target() {
 #[test]
 fn cli_defaults_to_no_approvals_and_rejects_conflicting_flags() {
     let url = "https://dev.azure.com/org/project/_build/results?buildId=1";
+    assert!(Args::try_parse_from(["watch"]).unwrap().url.is_none());
     let args = Args::try_parse_from(["watch", url]).unwrap();
     assert!(matches!(Policy::from_args(&args), Policy::None));
     let through_args = Args::try_parse_from(["watch", url, "--approve-through", "UAT"]).unwrap();

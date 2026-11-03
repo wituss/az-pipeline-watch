@@ -2,6 +2,7 @@ mod args;
 mod azure;
 mod controls;
 mod display;
+mod interactive;
 mod model;
 mod policy;
 mod watch;
@@ -26,17 +27,32 @@ use args::{Args, Target};
 use azure::Azure;
 use controls::{TerminalInput, adjust_interval};
 use display::{list_stages, render_refresh_interval};
+use interactive::{prompt_for_url, select_stages, show_selection};
 use policy::Policy;
 use watch::cycle;
 
 fn run() -> Result<()> {
     let args = Args::parse();
-    let target = Target::parse(&args.url)?;
+    let interactive = args.url.is_none();
+    let url = if let Some(url) = args.url.as_deref() {
+        url.to_owned()
+    } else {
+        prompt_for_url()?
+    };
+    let target = Target::parse(&url)?;
     let policy = Policy::from_args(&args);
     let api = Azure {
         target,
         timeout: Duration::from_secs(args.request_timeout),
     };
+    if interactive {
+        let Some(selected) = select_stages(&api)? else {
+            println!("Selection cancelled.");
+            return Ok(());
+        };
+        show_selection(&selected)?;
+        return Ok(());
+    }
     if args.list_stages {
         return list_stages(&api, &mut std::io::stdout().lock());
     }
