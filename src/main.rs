@@ -26,12 +26,13 @@ use std::{
 use args::{Args, Target};
 use azure::Azure;
 use controls::{Key, TerminalInput, adjust_interval};
-use display::{list_stages, render_refresh_interval};
-use interactive::{confirm_selection, prompt_for_url, select_stages};
+use display::{list_stages, timer_line};
+use interactive::{confirm_selection, prompt_for_url, select_stages, show_selection};
 use policy::Policy;
 use watch::cycle;
 
 fn run() -> Result<()> {
+    let watcher_started = Instant::now();
     let args = Args::parse();
     let interactive = args.url.is_none();
     let url = if let Some(url) = args.url.as_deref() {
@@ -55,7 +56,9 @@ fn run() -> Result<()> {
             println!("Selection cancelled.");
             return Ok(());
         };
-        if !confirm_selection(&selected)? {
+        if args.autoapprove {
+            show_selection(&selected)?;
+        } else if !confirm_selection(&selected)? {
             println!("Approval cancelled.");
             return Ok(());
         }
@@ -72,14 +75,16 @@ fn run() -> Result<()> {
     ctrlc::set_handler(move || signal.store(true, Ordering::Relaxed))?;
     let mut submitted = HashSet::new();
     let mut interval = args.interval;
+    let mut last_escape: Option<Instant> = None;
     while !stopped.load(Ordering::Relaxed) {
-        let build = cycle(
+        let (build, mut display) = cycle(
             &api,
             &policy,
             args.dry_run,
             refresh_screen,
-            interval,
+            (!args.once).then_some(interval),
             show_controls,
+            watcher_started,
             &mut submitted,
             &session,
             &stopped,
@@ -106,9 +111,29 @@ fn run() -> Result<()> {
             }
             if show_controls {
                 if let Some(key) = terminal_input.read_key(Duration::ZERO)? {
-                    if key == Key::Cancel {
+                    if key == Key::Interrupt {
                         stopped.store(true, Ordering::Relaxed);
                         break;
+                    }
+                    if key == Key::Escape {
+                        let now = Instant::now();
+                        if last_escape.is_some_and(|previous| {
+                            now.duration_since(previous) <= Duration::from_secs(1)
+                        }) {
+                            stopped.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        last_escape = Some(now);
+                        continue;
+                    }
+                    last_escape = None;
+                    if key == Key::Cancel {
+                        if terminal_input.confirm_exit()? {
+                            stopped.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        display.render(true)?;
+                        continue;
                     }
                     if matches!(key, Key::Other('r' | 'R')) {
                         refresh_now = true;
@@ -119,10 +144,23 @@ fn run() -> Result<()> {
                             if let Some(adjusted) = adjust_interval(interval, key as u8) {
                                 interval = adjusted;
                                 next_refresh = Instant::now() + Duration::from_secs(interval);
-                                render_refresh_interval(interval)?;
+                                display.controls_interval = Some(interval);
+                                display.timers.clear();
                             }
                         }
                     }
+                }
+            }
+            if refresh_screen {
+                let timers = timer_line(
+                    &build,
+                    watcher_started.elapsed(),
+                    Some(next_refresh.saturating_duration_since(Instant::now())),
+                    SystemTime::now(),
+                )?;
+                if timers != display.timers {
+                    display.timers = timers;
+                    display.render(true)?;
                 }
             }
             if refresh_now {

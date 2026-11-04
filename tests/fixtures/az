@@ -4,17 +4,31 @@
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
 root = Path(os.environ["WATCH_TEST_STATE"])
 args = sys.argv[1:]
-resource = args[args.index("--resource") + 1]
+resource = "source-change" if args[0] == "rest" else args[args.index("--resource") + 1]
 with (root / "calls.jsonl").open("a") as log:
     log.write(json.dumps(args) + "\n")
 
 if resource == "builds":
-    response = {"id": 123, "status": "inProgress", "result": None}
+    start = root / "start-time"
+    if not start.exists():
+        start.write_text((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat())
+    response = {"id": 123, "status": "inProgress", "result": None,
+                "startTime": start.read_text(), "buildNumber": "20261104.1",
+                "definition": {"name": "Deploy service"},
+                "repository": {"id": "org/service", "type": "GitHub"},
+                "requestedFor": {"displayName": "Build Service"},
+                "sourceVersion": "source-sha",
+                "triggerInfo": {"ci.message": "Merge feature",
+                                "ci.triggerRepository": "org/service"}}
+elif resource == "source-change":
+    response = {"value": [{"id": "source-sha", "message": "Merge feature",
+                           "author": {"displayName": "Test Author"}}]}
 elif resource == "timeline":
     counter = root / "timeline-count"
     count = int(counter.read_text()) + 1 if counter.exists() else 1

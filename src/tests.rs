@@ -5,13 +5,16 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashSet},
     sync::atomic::AtomicBool,
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::{
     args::{Args, Target},
     azure::Api,
     controls::adjust_interval,
-    display::{list_stages, render_frame},
+    display::{
+        format_duration, list_stages, pipeline_info, render_frame, section_with_width, timer_line,
+    },
     model::{Approval, Build, Record, Step, approval_stages},
     policy::Policy,
     watch::cycle,
@@ -53,6 +56,20 @@ fn cli_defaults_to_no_approvals_and_rejects_conflicting_flags() {
     assert!(Args::try_parse_from(["watch"]).unwrap().url.is_none());
     let args = Args::try_parse_from(["watch", url]).unwrap();
     assert!(matches!(Policy::from_args(&args), Policy::None));
+    assert!(!args.autoapprove);
+    assert!(
+        Args::try_parse_from(["watch", "--autoapprove"])
+            .unwrap()
+            .autoapprove
+    );
+    for conflicting in [
+        vec!["watch", url, "--autoapprove"],
+        vec!["watch", "--autoapprove", "--approve-all"],
+        vec!["watch", "--autoapprove", "--approve-through", "UAT"],
+        vec!["watch", "--autoapprove", "--list-stages"],
+    ] {
+        assert!(Args::try_parse_from(conflicting).is_err());
+    }
     let through_args = Args::try_parse_from(["watch", url, "--approve-through", "UAT"]).unwrap();
     assert!(matches!(Policy::from_args(&through_args), Policy::Through(stage) if stage == "UAT"));
     assert!(
@@ -72,6 +89,54 @@ fn cli_defaults_to_no_approvals_and_rejects_conflicting_flags() {
 }
 
 #[test]
+fn pipeline_metadata_uses_azure_fields_and_handles_missing_metadata() {
+    let build: Build = serde_json::from_value(json!({
+        "id": 42, "status": "inProgress", "buildNumber": "20261104.1",
+        "definition": {"name": "Deploy service"},
+        "repository": {"name": "service"},
+        "requestedFor": {"displayName": "Test Author"}
+    }))
+    .unwrap();
+    assert_eq!(
+        pipeline_info(&build),
+        "Pipeline: Deploy service | Run: 20261104.1\nTitle: -\nRepository: service | Commit author: -\n"
+    );
+    let build = Fake::default().build().unwrap();
+    assert_eq!(
+        pipeline_info(&build),
+        "Pipeline: - | Run: -\nTitle: -\nRepository: - | Commit author: -\n"
+    );
+}
+
+#[test]
+fn github_metadata_uses_trigger_title_repository_id_and_source_commit_author() {
+    let mut build: Build = serde_json::from_value(json!({
+        "id": 42, "status": "inProgress",
+        "repository": {"id": "org/service", "type": "GitHub"},
+        "requestedFor": {"displayName": "Build Service"},
+        "triggerInfo": {"ci.message": "Merge feature\nExtra details"}
+    }))
+    .unwrap();
+    build.source_change = Some(
+        serde_json::from_value(json!({
+            "id": "source-sha", "message": "Commit title",
+            "author": {"displayName": "Commit Author"}
+        }))
+        .unwrap(),
+    );
+    let info = pipeline_info(&build);
+    assert!(info.contains("Title: Merge feature\n"));
+    assert!(info.contains("Repository: org/service | Commit author: Commit Author\n"));
+    assert!(!info.contains("Requested for"));
+    build.trigger_info.clear();
+    assert!(pipeline_info(&build).contains("Title: Commit title\n"));
+    build
+        .trigger_info
+        .insert("ci.triggerRepository".into(), "org/trigger".into());
+    assert!(pipeline_info(&build).contains("Repository: org/trigger |"));
+}
+
+#[test]
 fn terminal_refresh_clears_screen_but_logs_remain_plain_text() {
     let mut terminal = Vec::new();
     render_frame(&mut terminal, "pipeline status\n", true).unwrap();
@@ -80,6 +145,77 @@ fn terminal_refresh_clears_screen_but_logs_remain_plain_text() {
     let mut log = Vec::new();
     render_frame(&mut log, "pipeline status\n", false).unwrap();
     assert_eq!(&log, b"pipeline status\n");
+}
+
+#[test]
+fn section_frames_wrap_long_lines_and_preserve_unicode_display_width() {
+    let frame = section_with_width("Timers", "1234567890123456789012345\n🟣 test", 24);
+    for line in frame.lines() {
+        assert_eq!(unicode_width::UnicodeWidthStr::width(line), 24);
+    }
+    assert!(frame.starts_with("+-- Timers "));
+    assert!(frame.contains("| 12345678901234567890 |\n| 12345"));
+    assert!(frame.contains("| 🟣 test"));
+}
+
+#[test]
+fn timers_use_build_timestamps_and_keep_completed_duration_fixed() {
+    let start: SystemTime = "2026-11-04T08:00:00Z"
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .unwrap()
+        .into();
+    let mut build: Build = serde_json::from_value(json!({
+        "id": 42, "status": "inProgress",
+        "startTime": "2026-11-04T09:00:00.5000000+01:00"
+    }))
+    .unwrap();
+    let now = start + Duration::from_secs(3662);
+    assert_eq!(
+        timer_line(
+            &build,
+            Duration::from_secs(62),
+            Some(Duration::from_millis(2100)),
+            now
+        )
+        .unwrap(),
+        "Watcher: 00:01:02 | Next refresh: 3s | Pipeline: 01:01:01"
+    );
+    build.status = "completed".into();
+    build.finish_time = Some("2026-11-04T08:01:00.500Z".parse().unwrap());
+    for now in [now, now + Duration::from_secs(600)] {
+        assert_eq!(
+            timer_line(
+                &build,
+                Duration::from_secs(90),
+                Some(Duration::from_secs(30)),
+                now
+            )
+            .unwrap(),
+            "Watcher: 00:01:30 | Next refresh: - | Pipeline: 00:01:00"
+        );
+    }
+    assert_eq!(format_duration(Duration::from_secs(90061)), "25:01:01");
+}
+
+#[test]
+fn timers_handle_missing_timestamps_and_reject_invalid_ones() {
+    let mut build: Build =
+        serde_json::from_value(json!({"id": 42, "status": "notStarted"})).unwrap();
+    assert_eq!(
+        timer_line(&build, Duration::ZERO, None, SystemTime::now()).unwrap(),
+        "Watcher: 00:00:00 | Next refresh: - | Pipeline: -"
+    );
+    build.status = "completed".into();
+    build.start_time = Some("2026-11-04T08:00:00Z".parse().unwrap());
+    assert_eq!(build.duration_at(SystemTime::now()).unwrap(), None);
+    build.finish_time = Some("2026-11-04T07:59:59Z".parse().unwrap());
+    assert!(build.duration_at(SystemTime::now()).is_err());
+    assert!(
+        serde_json::from_value::<Build>(json!({
+            "id": 42, "status": "inProgress", "startTime": "invalid"
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -163,6 +299,14 @@ impl Api for Fake {
             }
             .into(),
             result: self.completed.then(|| "succeeded".into()),
+            start_time: None,
+            finish_time: None,
+            build_number: None,
+            definition: None,
+            repository: None,
+            source_version: None,
+            trigger_info: BTreeMap::new(),
+            source_change: None,
         })
     }
 
@@ -223,12 +367,14 @@ fn tick(
         policy,
         dry_run,
         false,
-        30,
+        Some(30),
         false,
+        Instant::now(),
         submitted,
         "test",
         &AtomicBool::new(false),
     )
+    .map(|(build, _)| build)
 }
 
 #[test]
@@ -296,8 +442,9 @@ fn all_can_include_production_but_stopping_prevents_writes() {
         &Policy::All,
         false,
         false,
-        30,
+        Some(30),
         false,
+        Instant::now(),
         &mut HashSet::new(),
         "test",
         &AtomicBool::new(true),
@@ -349,6 +496,8 @@ fn listing_includes_completed_approvals_and_never_writes() {
     let mut output = Vec::new();
     list_stages(&api, &mut output).unwrap();
     let output = String::from_utf8(output).unwrap();
+    assert_eq!(output.matches("+-- Stages & approvals ").count(), 1);
+    assert_eq!(output.matches("Approval QA-approval:").count(), 1);
     assert!(output.contains("Approval QA-approval: pending; can approve now: no"));
     assert!(output.contains("Approval UAT-approval: pending; can approve now: yes"));
     assert!(output.contains("No approval records yet"));

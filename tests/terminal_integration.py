@@ -6,6 +6,7 @@ Uses ConPTY on Windows or POSIX PTY elsewhere, and a local az double.
 import errno
 import json
 import os
+import re
 from pathlib import Path
 import select
 import shutil
@@ -126,17 +127,21 @@ class TerminalSession:
                 )
             self.read()
 
-    def choose_uat(self):
+    def choose_uat(self, autoapprove=False):
         self.expect("Azure DevOps build URL:")
         self.send(URL)
         self.expect("Select stages to approve")
+        self.expect("Pipeline: Deploy service | Run: 20261104.1")
+        self.expect("Title: Merge feature")
+        self.expect("Repository: org/service | Commit author: Test Author")
         self.expect("> [ ] Build")
         self.send(b"\x1b[B")
         self.expect("> [ ] UAT")
         self.send(b" ")
         self.expect("> [x] UAT")
         self.send(b"\r")
-        self.expect("Type 'approve'")
+        if not autoapprove:
+            self.expect("Type 'approve'")
 
     def finish(self, expected_code=0):
         deadline = time.monotonic() + 15
@@ -159,6 +164,9 @@ class TerminalSession:
         return [vote for line in path.read_text().splitlines()
                 for vote in json.loads(line)] if path.exists() else []
 
+    def request_exit(self):
+        self.send(b"\x03")
+
 
 class TerminalIntegrationTests(unittest.TestCase):
     def test_selects_pending_stage_and_approves_only_uat(self):
@@ -170,7 +178,7 @@ class TerminalIntegrationTests(unittest.TestCase):
             # A second cycle must not repeat a vote already submitted.
             session.send(b"r")
             session.expect("Approval UAT-approval [UAT]: approved")
-            session.send(b"\x03")
+            session.request_exit()
             session.finish()
             self.assertEqual(
                 [vote["approvalId"] for vote in session.votes()], ["UAT-approval"]
@@ -191,6 +199,8 @@ class TerminalIntegrationTests(unittest.TestCase):
             session.send(URL)
             session.expect("Select stages to approve")
             session.send(b"\x1b")
+            session.expect("Are you sure you want to exit?")
+            session.send(b"y")
             session.expect("Selection cancelled.")
             session.finish()
             self.assertEqual(session.votes(), [])
@@ -199,7 +209,42 @@ class TerminalIntegrationTests(unittest.TestCase):
         with TerminalSession() as session:
             session.choose_uat()
             session.send(b"no\n")
+            session.expect("Are you sure you want to exit?")
+            self.assertEqual(session.votes(), [])
+            session.send(b"yes\n")
             session.expect("Approval cancelled.")
+            session.finish()
+            self.assertEqual(session.votes(), [])
+
+    def test_declining_exit_returns_to_approval_confirmation(self):
+        with TerminalSession("--once") as session:
+            session.choose_uat()
+            session.send(b"wrong\n")
+            session.expect("Are you sure you want to exit?")
+            self.assertEqual(session.votes(), [])
+            session.send(b"no\n")
+            session.expect("Type 'approve'")
+            session.send(b"approve\n")
+            session.expect("Confirmed approval vote for UAT")
+            session.finish()
+            self.assertEqual(
+                [vote["approvalId"] for vote in session.votes()], ["UAT-approval"]
+            )
+
+    def test_autoapprove_skips_token_but_only_approves_selected_stages(self):
+        with TerminalSession("--autoapprove", "--once") as session:
+            session.choose_uat(autoapprove=True)
+            session.expect("Confirmed approval vote for UAT")
+            session.finish()
+            self.assertNotIn(b"Type 'approve'", session.output)
+            self.assertEqual(
+                [vote["approvalId"] for vote in session.votes()], ["UAT-approval"]
+            )
+
+    def test_autoapprove_dry_run_never_writes(self):
+        with TerminalSession("--autoapprove", "--dry-run", "--once") as session:
+            session.choose_uat(autoapprove=True)
+            session.expect("DRY RUN: would approve UAT-approval for UAT")
             session.finish()
             self.assertEqual(session.votes(), [])
 
@@ -218,13 +263,96 @@ class TerminalIntegrationTests(unittest.TestCase):
             session.expect("Refresh interval: 30s")
             session.expect("DRY RUN: would approve UAT-approval for UAT")
             session.send(b"+")
+            session.expect("Next refresh: 25s")
             session.expect("Refresh interval: 25s")
             session.send(b"-")
+            session.expect("Next refresh: 30s")
             session.expect("Refresh interval: 30s")
             session.send(b"r")
             session.expect("DRY RUN: would approve UAT-approval for UAT")
-            session.send(b"\x03")
+            session.request_exit()
             session.expect("Monitoring stopped.")
+            session.finish()
+            self.assertEqual(session.votes(), [])
+
+    def test_timers_tick_without_polling_azure(self):
+        with TerminalSession(URL.decode().strip(), "--interval", "30") as session:
+            session.expect("Next refresh: 30s | Pipeline: 00:01:")
+            calls = (session.root / "calls.jsonl").read_text()
+            session.expect("Next refresh: 29s")
+            session.expect("Next refresh: 28s")
+            self.assertEqual((session.root / "calls.jsonl").read_text(), calls)
+            elapsed = re.findall(rb"Watcher: 00:00:(\d+)", session.output)
+            self.assertGreaterEqual(int(elapsed[-1]), 2)
+            pipeline = re.findall(rb"Pipeline: 00:01:(\d+)", session.output)
+            self.assertGreater(int(pipeline[-1]), int(pipeline[0]))
+            session.send(b"r")
+            session.expect("Build 123: inProgress")
+            session.expect("Next refresh: 30s")
+            session.request_exit()
+            session.finish()
+            self.assertEqual(session.votes(), [])
+
+    def test_monitoring_frames_put_timers_below_metadata(self):
+        with TerminalSession(URL.decode().strip(), "--interval", "30") as session:
+            session.expect("+-- Pipeline info ")
+            session.expect("Commit author: Test Author")
+            session.expect("+-- Timers ")
+            session.expect("Watcher:")
+            session.expect("+-- Stages & approvals ")
+            self.assertNotIn(b"Requested for:", session.output)
+            session.send(b"+")
+            session.expect("+-- Timers ")
+            session.expect("Next refresh: 25s")
+            session.expect("Refresh interval: 25s")
+            session.request_exit()
+            session.finish()
+
+    def test_accidental_exit_keys_can_be_declined_without_stopping_watcher(self):
+        with TerminalSession(URL.decode().strip(), "--interval", "30") as session:
+            session.expect("+-- Stages & approvals ")
+            for key, decline in [(b"q", b"n"), (b"q", b"\x1b")]:
+                session.send(key)
+                session.expect("Are you sure you want to exit?")
+                session.send(decline)
+                session.expect("+-- Pipeline info ")
+                self.assertTrue(session.alive())
+            session.send(b"r")
+            session.expect("Build 123: inProgress")
+            session.request_exit()
+            session.finish()
+            self.assertEqual(session.votes(), [])
+
+    def test_monitoring_exits_only_on_two_quick_escapes(self):
+        with TerminalSession(URL.decode().strip(), "--interval", "30") as session:
+            session.expect("Next refresh: 30s")
+            session.send(b"\x1b")
+            session.expect("Next refresh: 28s")
+            self.assertTrue(session.alive())
+            session.send(b"\x1b")
+            session.expect("Next refresh: 26s")
+            self.assertTrue(session.alive())
+            session.send(b"\x1b")
+            time.sleep(0.15)
+            session.send(b"\x1b")
+            session.expect("Monitoring stopped.")
+            session.finish()
+            self.assertNotIn(b"Are you sure", session.output)
+
+    def test_declining_selection_exit_preserves_selected_stages(self):
+        with TerminalSession("--dry-run", "--once") as session:
+            session.expect("Azure DevOps build URL:")
+            session.send(URL)
+            session.expect("> [ ] Build")
+            session.send(b" ")
+            session.expect("> [x] Build")
+            session.send(b"\x1b")
+            session.expect("Are you sure you want to exit?")
+            session.send(b"n")
+            session.expect("> [x] Build")
+            session.send(b"\r")
+            session.expect("Type 'approve'")
+            session.send(b"approve\n")
             session.finish()
             self.assertEqual(session.votes(), [])
 

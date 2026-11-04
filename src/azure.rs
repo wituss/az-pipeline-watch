@@ -10,7 +10,7 @@ use std::{
 use wait_timeout::ChildExt;
 
 use crate::args::Target;
-use crate::model::{Approval, Build, Record, Timeline};
+use crate::model::{Approval, Build, BuildChange, Record, Timeline};
 
 pub(crate) trait Api {
     fn build(&self) -> Result<Build>;
@@ -65,6 +65,12 @@ impl Azure {
             command.arg(file.path());
             input = Some(file);
         }
+        let response = self.execute(&mut command, &format!("{area}/{resource}"));
+        drop(input);
+        response
+    }
+
+    fn execute(&self, command: &mut Command, operation: &str) -> Result<Value> {
         command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -95,15 +101,14 @@ impl Azure {
         let stderr = err
             .join()
             .map_err(|_| anyhow::anyhow!("stderr reader panicked"))??;
-        drop(input);
         ensure!(
             !timed_out,
-            "az {area}/{resource} timed out; stopping without retry"
+            "az {operation} timed out; stopping without retry"
         );
         let status = status?.context("az returned no exit status")?;
         ensure!(
             status.success(),
-            "az {area}/{resource} failed ({status}): {}",
+            "az {operation} failed ({status}): {}",
             String::from_utf8_lossy(&stderr).trim()
         );
         if !stderr.is_empty() {
@@ -122,8 +127,42 @@ impl Api for Azure {
             &[],
             None,
         )?;
-        let build: Build = serde_json::from_value(value)?;
+        let mut build: Build = serde_json::from_value(value)?;
         ensure!(build.id == self.target.build_id, "Build ID mismatch");
+        if let Some(version) = &build.source_version {
+            let mut url = url::Url::parse(&self.target.organization)?;
+            url.path_segments_mut()
+                .map_err(|_| anyhow::anyhow!("Invalid organization URL"))?
+                .push(&self.target.project)
+                .extend(["_apis", "build", "builds", &build.id.to_string(), "changes"]);
+            url.query_pairs_mut()
+                .append_pair("api-version", "7.1")
+                .append_pair("$top", "1")
+                .append_pair("includeSourceChange", "true");
+            let mut command = Command::new("az");
+            command.args([
+                "rest",
+                "--method",
+                "get",
+                "--url",
+                url.as_str(),
+                "--resource",
+                "499b84ac-1321-427f-aa17-267ca6975798",
+                "--only-show-errors",
+                "--output",
+                "json",
+            ]);
+            #[derive(Deserialize)]
+            struct Changes {
+                value: Vec<BuildChange>,
+            }
+            let changes: Changes =
+                serde_json::from_value(self.execute(&mut command, "build/source-change")?)?;
+            build.source_change = changes
+                .value
+                .into_iter()
+                .find(|change| &change.id == version);
+        }
         Ok(build)
     }
 

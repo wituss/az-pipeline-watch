@@ -9,8 +9,8 @@ use std::{
 use crate::{
     azure::Api,
     controls::{Key, TerminalInput},
-    display::render_frame,
-    model::{Record, approval_stages},
+    display::{pipeline_info, render_frame, section},
+    model::{Build, Record, approval_stages},
 };
 
 struct StageChoice {
@@ -63,6 +63,7 @@ fn stage_choices(api: &impl Api, records: &[Record]) -> Result<Vec<StageChoice>>
 }
 
 fn render_choices(
+    build: &Build,
     stages: &[StageChoice],
     selected: &BTreeSet<String>,
     cursor: usize,
@@ -71,6 +72,8 @@ fn render_choices(
     let mut frame = String::from(
         "Select stages to approve\nUp/Down move  Space select  Enter continue  q/Esc/Ctrl-C cancel\n\n",
     );
+    frame.push_str(&section("Pipeline info", &pipeline_info(build)));
+    let mut choices = String::new();
     for (index, stage) in stages.iter().enumerate() {
         let marker = if selected.contains(&stage.id) {
             "[x]"
@@ -83,7 +86,7 @@ fn render_choices(
             format!("{} approval(s) available", stage.actionable_approvals)
         };
         writeln!(
-            frame,
+            choices,
             "{} {marker} {:<24} {:<12} {:<28} {}",
             if index == cursor { ">" } else { " " },
             stage.id,
@@ -92,6 +95,7 @@ fn render_choices(
             stage.name
         )?;
     }
+    frame.push_str(&section("Stages & approvals", &choices));
     render_frame(output, &frame, true)?;
     Ok(())
 }
@@ -115,7 +119,13 @@ pub(crate) fn select_stages(api: &impl Api) -> Result<Option<BTreeSet<String>>> 
         .position(|stage| stage.actionable_approvals > 0)
         .unwrap_or(0);
     loop {
-        render_choices(&stages, &selected, cursor, &mut std::io::stdout().lock())?;
+        render_choices(
+            &build,
+            &stages,
+            &selected,
+            cursor,
+            &mut std::io::stdout().lock(),
+        )?;
         let key = loop {
             if let Some(key) = terminal.read_key(Duration::from_millis(100))? {
                 break key;
@@ -135,7 +145,11 @@ pub(crate) fn select_stages(api: &impl Api) -> Result<Option<BTreeSet<String>>> 
                     return Ok(Some(selected));
                 }
             }
-            Key::Cancel => return Ok(None),
+            Key::Cancel | Key::Escape | Key::Interrupt => {
+                if terminal.confirm_exit()? {
+                    return Ok(None);
+                }
+            }
             Key::Other(_) => {}
         }
     }
@@ -151,11 +165,37 @@ pub(crate) fn show_selection(selected: &BTreeSet<String>) -> Result<()> {
 
 pub(crate) fn confirm_selection(selected: &BTreeSet<String>) -> Result<bool> {
     show_selection(selected)?;
-    print!("Type 'approve' to submit these approvals, or anything else to cancel: ");
-    std::io::stdout().flush()?;
-    let mut response = String::new();
-    std::io::stdin().read_line(&mut response)?;
-    Ok(is_approval_confirmation(&response))
+    confirm_approval(&mut std::io::stdin().lock(), &mut std::io::stdout().lock())
+}
+
+fn confirm_approval(input: &mut impl std::io::BufRead, output: &mut impl Write) -> Result<bool> {
+    loop {
+        write!(
+            output,
+            "Type 'approve' to submit these approvals, or anything else to cancel: "
+        )?;
+        output.flush()?;
+        let mut response = String::new();
+        if input.read_line(&mut response)? == 0 {
+            return Ok(false);
+        }
+        if is_approval_confirmation(&response) {
+            return Ok(true);
+        }
+        loop {
+            write!(output, "Are you sure you want to exit? [y/N]: ")?;
+            output.flush()?;
+            response.clear();
+            if input.read_line(&mut response)? == 0 {
+                return Ok(false);
+            }
+            match response.trim().to_ascii_lowercase().as_str() {
+                "y" | "yes" => return Ok(false),
+                "" | "n" | "no" => break,
+                _ => writeln!(output, "Please answer yes or no.")?,
+            }
+        }
+    }
 }
 
 fn is_approval_confirmation(response: &str) -> bool {
@@ -172,6 +212,20 @@ mod tests {
         assert!(is_approval_confirmation(" approve \n"));
         assert!(!is_approval_confirmation("yes"));
         assert!(!is_approval_confirmation(""));
+    }
+
+    #[test]
+    fn declining_exit_retries_approval_and_never_approves_from_yes_alone() {
+        for input in [
+            "wrong\nno\napprove\n",
+            "\n\napprove\n",
+            "no\ninvalid\nn\napprove\n",
+        ] {
+            assert!(confirm_approval(&mut input.as_bytes(), &mut Vec::new()).unwrap());
+        }
+        for input in ["no\nyes\n", "yes\ny\n", "", "no\n"] {
+            assert!(!confirm_approval(&mut input.as_bytes(), &mut Vec::new()).unwrap());
+        }
     }
 
     #[test]

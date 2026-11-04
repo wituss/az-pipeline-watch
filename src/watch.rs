@@ -3,11 +3,12 @@ use std::{
     collections::HashSet,
     fmt::Write as FmtWrite,
     sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::{
     azure::Api,
-    display::render_frame,
+    display::{WatchDisplay, pipeline_info, timer_line},
     model::{Build, approval_stages},
     policy::Policy,
 };
@@ -17,12 +18,13 @@ pub(crate) fn cycle(
     policy: &Policy,
     dry_run: bool,
     refresh_screen: bool,
-    refresh_interval: u64,
+    refresh_interval: Option<u64>,
     show_controls: bool,
+    watcher_started: Instant,
     submitted: &mut HashSet<String>,
     session: &str,
     stopped: &AtomicBool,
-) -> Result<Build> {
+) -> Result<(Build, WatchDisplay)> {
     let build = api.build()?;
     let records = api.timeline()?;
     let mut output = String::new();
@@ -36,13 +38,23 @@ pub(crate) fn cycle(
         build.result.as_deref().unwrap_or("-")
     )
     .expect("writing to a String cannot fail");
-    if show_controls {
-        writeln!(
-            output,
-            "Refresh interval: {refresh_interval}s | r refresh, + faster, - slower, Ctrl-C exit"
-        )
-        .expect("writing to a String cannot fail");
-    }
+    output.push_str(&pipeline_info(&build));
+    let mut display = WatchDisplay {
+        info: output,
+        pipeline: String::new(),
+        timers: timer_line(
+            &build,
+            watcher_started.elapsed(),
+            refresh_interval.map(Duration::from_secs),
+            SystemTime::now(),
+        )?,
+        controls_interval: if show_controls {
+            Some(refresh_interval.context("Missing interactive refresh interval")?)
+        } else {
+            None
+        },
+    };
+    let output = &mut display.pipeline;
     let mut stages: Vec<_> = records.iter().filter(|r| r.kind == "Stage").collect();
     stages.sort_by_key(|r| r.order);
     for stage in stages {
@@ -70,8 +82,8 @@ pub(crate) fn cycle(
     }
     let selected_stages = policy.selected_stages(&records)?;
     if build.status == "completed" || build.status == "cancelling" {
-        render_frame(&mut std::io::stdout().lock(), &output, refresh_screen)?;
-        return Ok(build);
+        display.render(refresh_screen)?;
+        return Ok((build, display));
     }
     for (id, stage) in approval_stages(&records, false)? {
         if stopped.load(Ordering::Relaxed) {
@@ -135,6 +147,6 @@ pub(crate) fn cycle(
         )
         .expect("writing to a String cannot fail");
     }
-    render_frame(&mut std::io::stdout().lock(), &output, refresh_screen)?;
-    Ok(build)
+    display.render(refresh_screen)?;
+    Ok((build, display))
 }

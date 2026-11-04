@@ -5,7 +5,10 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use std::{io::IsTerminal, time::Duration};
+use std::{
+    io::{IsTerminal, Write},
+    time::Duration,
+};
 
 pub(crate) struct TerminalInput {
     enabled: bool,
@@ -18,6 +21,8 @@ pub(crate) enum Key {
     Toggle,
     Confirm,
     Cancel,
+    Escape,
+    Interrupt,
     Other(char),
 }
 
@@ -27,7 +32,7 @@ fn decode_key(event: KeyEvent) -> Option<Key> {
     }
     if event.modifiers.contains(KeyModifiers::CONTROL) {
         return match event.code {
-            KeyCode::Char('c' | 'C') => Some(Key::Cancel),
+            KeyCode::Char('c' | 'C') => Some(Key::Interrupt),
             _ => None,
         };
     }
@@ -36,7 +41,8 @@ fn decode_key(event: KeyEvent) -> Option<Key> {
         KeyCode::Down => Some(Key::Down),
         KeyCode::Char(' ') => Some(Key::Toggle),
         KeyCode::Enter => Some(Key::Confirm),
-        KeyCode::Esc | KeyCode::Char('q' | 'Q') => Some(Key::Cancel),
+        KeyCode::Esc => Some(Key::Escape),
+        KeyCode::Char('q' | 'Q') => Some(Key::Cancel),
         KeyCode::Char(key) => Some(Key::Other(key)),
         _ => None,
     }
@@ -69,6 +75,25 @@ impl TerminalInput {
         match event::read().context("Cannot read terminal input")? {
             Event::Key(key) => Ok(decode_key(key)),
             _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn confirm_exit(&self) -> Result<bool> {
+        let mut output = std::io::stdout().lock();
+        write!(output, "\r\nAre you sure you want to exit? [y/N]: ")?;
+        output.flush()?;
+        loop {
+            match self.read_key(Duration::from_millis(100))? {
+                Some(Key::Other('y' | 'Y')) => return Ok(true),
+                Some(
+                    Key::Other('n' | 'N')
+                    | Key::Confirm
+                    | Key::Cancel
+                    | Key::Escape
+                    | Key::Interrupt,
+                ) => return Ok(false),
+                _ => {}
+            }
         }
     }
 }
@@ -105,7 +130,7 @@ mod tests {
             (KeyCode::Down, Key::Down),
             (KeyCode::Char(' '), Key::Toggle),
             (KeyCode::Enter, Key::Confirm),
-            (KeyCode::Esc, Key::Cancel),
+            (KeyCode::Esc, Key::Escape),
             (KeyCode::Char('q'), Key::Cancel),
             (KeyCode::Char('+'), Key::Other('+')),
         ] {
@@ -116,7 +141,7 @@ mod tests {
         }
         assert_eq!(
             decode_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Some(Key::Cancel)
+            Some(Key::Interrupt)
         );
     }
 

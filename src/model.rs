@@ -1,12 +1,67 @@
 use anyhow::{Context, Result, ensure};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::{Duration, SystemTime},
+};
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct Build {
     pub(crate) id: u64,
     pub(crate) status: String,
     pub(crate) result: Option<String>,
+    pub(crate) start_time: Option<DateTime<Utc>>,
+    pub(crate) finish_time: Option<DateTime<Utc>>,
+    pub(crate) build_number: Option<String>,
+    pub(crate) definition: Option<BuildDefinition>,
+    pub(crate) repository: Option<BuildRepository>,
+    pub(crate) source_version: Option<String>,
+    #[serde(default)]
+    pub(crate) trigger_info: BTreeMap<String, String>,
+    #[serde(skip)]
+    pub(crate) source_change: Option<BuildChange>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct BuildChange {
+    pub(crate) id: String,
+    pub(crate) message: Option<String>,
+    pub(crate) author: Option<BuildIdentity>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct BuildDefinition {
+    pub(crate) name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct BuildRepository {
+    pub(crate) name: Option<String>,
+    pub(crate) id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BuildIdentity {
+    pub(crate) display_name: Option<String>,
+}
+
+impl Build {
+    pub(crate) fn duration_at(&self, now: SystemTime) -> Result<Option<Duration>> {
+        let Some(start) = self.start_time else {
+            return Ok(None);
+        };
+        let end = match self.finish_time {
+            Some(finish) => finish,
+            None if self.status == "completed" => return Ok(None),
+            None => now.into(),
+        };
+        Ok(Some((end - start).to_std().context(
+            "Pipeline end time precedes its start time; check timestamps and local clock",
+        )?))
+    }
 }
 
 #[derive(Debug, Deserialize)]

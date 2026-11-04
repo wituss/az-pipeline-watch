@@ -46,6 +46,20 @@ az-pipeline-watch 'https://dev.azure.com/ORG/PROJECT/_build/results?buildId=123'
 
 Supplying a URL without approval flags is read-only. Status refreshes every
 30 seconds in place in an interactive terminal; redirected output is plain text.
+The status shows watcher uptime, time until the next refresh, and pipeline
+duration from Azure DevOps start/finish timestamps. Timers update live while
+waiting in a terminal, without extra API calls; redirected output includes a
+snapshot per poll. Pipeline duration is `-` when the required timestamps are
+unavailable (for example, before the run starts).
+The stage selector and status output also show the pipeline name, run number,
+source change title, triggering repository, and source commit author.
+The monitoring view separates metadata, timers, and stages/approvals into
+`Pipeline info`, `Timers`, and `Stages & approvals` frames, fitted to the terminal
+width with long lines wrapped. Timers appear below the metadata.
+The title comes from the CI trigger message or the source commit's first message
+line; repository IDs are used when names are absent, as with GitHub builds.
+Source commit metadata is read using `az rest` with the existing Azure CLI login.
+Missing metadata is displayed as `-`.
 
 While waiting between polling cycles:
 
@@ -55,6 +69,12 @@ While waiting between polling cycles:
 | `+` or `=` | Decrease the interval by 5 seconds, down to 1 second |
 | `-` | Increase the interval by 5 seconds, up to 3,600 seconds |
 | `Ctrl-C` | Stop monitoring |
+
+While monitoring, press Esc twice within one second or Ctrl-C once to exit.
+A single Esc does not stop monitoring; any other key resets the double-Esc sequence.
+`q` still asks for confirmation. In the stage selector, `Esc`, `q`, and `Ctrl-C`
+ask before exiting. Press `y` to exit; `n`, Enter, or Esc resumes the current view.
+Non-interactive termination, errors, and completed runs do not prompt.
 
 ```bash
 # Inspect stages and existing approval status without submitting votes.
@@ -79,8 +99,21 @@ az-pipeline-watch
 
 Enter the build URL, then use Up/Down to navigate, Space to select stages,
 and Enter to continue. Type `approve` to confirm; `q` or Escape cancels selection.
+If you enter anything other than `approve`, the watcher asks whether to exit.
+Answer `yes` to cancel or `no` (the default) to retry confirmation.
 Stages may be selected before their approvals become available. The build must
 be in progress.
+
+To skip typing `approve` while still selecting stages manually:
+
+```bash
+az-pipeline-watch --autoapprove
+```
+
+Pressing Enter with a nonempty selection authorizes approvals for only those
+selected stages, potentially including production. This flag is only available
+without a URL and cannot be combined with `--approve-all`, `--approve-through`,
+or `--list-stages`. `--dry-run` still prevents writes.
 
 After confirmation, this mode monitors the run and submits approvals as they
 become available for the selected stages. Use `--once` to check only once or
