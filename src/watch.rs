@@ -53,6 +53,7 @@ pub(crate) fn cycle(
         } else {
             None
         },
+        escape_pending: false,
     };
     let output = &mut display.pipeline;
     let mut stages: Vec<_> = records.iter().filter(|r| r.kind == "Stage").collect();

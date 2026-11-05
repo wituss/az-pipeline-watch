@@ -124,6 +124,8 @@ fn run() -> Result<()> {
                             break;
                         }
                         last_escape = Some(now);
+                        display.escape_pending = true;
+                        display.render(true)?;
                         continue;
                     }
                     last_escape = None;
@@ -158,8 +160,11 @@ fn run() -> Result<()> {
                     Some(next_refresh.saturating_duration_since(Instant::now())),
                     SystemTime::now(),
                 )?;
-                if timers != display.timers {
+                let escape_pending = last_escape
+                    .is_some_and(|previous| previous.elapsed() <= Duration::from_secs(1));
+                if timers != display.timers || escape_pending != display.escape_pending {
                     display.timers = timers;
+                    display.escape_pending = escape_pending;
                     display.render(true)?;
                 }
             }

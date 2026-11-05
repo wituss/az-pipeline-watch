@@ -20,6 +20,7 @@ pub(crate) struct WatchDisplay {
     pub(crate) pipeline: String,
     pub(crate) timers: String,
     pub(crate) controls_interval: Option<u64>,
+    pub(crate) escape_pending: bool,
 }
 
 impl WatchDisplay {
@@ -29,6 +30,11 @@ impl WatchDisplay {
             timers.push_str(&format!(
                 "\nRefresh interval: {interval}s | r refresh, + faster, - slower, Esc twice / Ctrl-C exit\n"
             ));
+        }
+        if self.escape_pending {
+            timers.push_str(
+                "\nPress Esc again within one second to exit; Ctrl-C exits immediately.\n",
+            );
         }
         let frame = format!(
             "{}{}{}",
