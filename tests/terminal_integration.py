@@ -30,7 +30,6 @@ BINARY = Path(sys.argv.pop(1) if len(sys.argv) > 1 else
               "target/release/az-pipeline-watch").resolve()
 URL = b"https://dev.azure.com/org/project/_build/results?buildId=123\n"
 
-WINDOWS_MOCK = None
 
 
 class TerminalSession:
@@ -39,7 +38,9 @@ class TerminalSession:
         self.root = Path(self.directory.name)
         fixture = (Path(__file__).parent / "fixtures" / "az").resolve()
         if os.name == "nt":
-            shutil.copyfile(WINDOWS_MOCK, self.root / "az.exe")
+            # Real Azure CLI on Windows is a batch file, not an executable.
+            (self.root / "az.cmd").write_text(
+                '@"%WATCH_TEST_PYTHON%" "%WATCH_TEST_AZ_SCRIPT%" %*\r\n')
         else:
             mock = self.root / "az"
             shutil.copyfile(fixture, mock)
@@ -360,14 +361,4 @@ class TerminalIntegrationTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    if os.name == "nt":
-        with tempfile.TemporaryDirectory(prefix="watch-mock-build-") as directory:
-            WINDOWS_MOCK = Path(directory) / "az.exe"
-            subprocess.run([
-                "rustc", str(Path(__file__).parent / "fixtures" / "az.rs"),
-                "-o", str(WINDOWS_MOCK),
-            ], check=True)
-            result = unittest.main(verbosity=2, exit=False).result
-        sys.exit(0 if result.wasSuccessful() else 1)
-    else:
-        unittest.main(verbosity=2)
+    unittest.main(verbosity=2)

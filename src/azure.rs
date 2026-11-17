@@ -2,7 +2,8 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    io::{Read, Write},
+    ffi::OsString,
+    io::{ErrorKind, Read, Write},
     process::{Command, Stdio},
     thread,
     time::Duration,
@@ -19,6 +20,23 @@ pub(crate) trait Api {
     fn approve(&self, id: &str, comment: &str) -> Result<()>;
 }
 
+/// Windows `Command` only appends `.exe`, but Azure CLI installs `az.cmd`.
+fn az_program() -> OsString {
+    if cfg!(windows) {
+        if let Some(path) = std::env::var_os("PATH") {
+            for directory in std::env::split_paths(&path) {
+                for name in ["az.exe", "az.cmd", "az.bat"] {
+                    let candidate = directory.join(name);
+                    if candidate.is_file() {
+                        return candidate.into_os_string();
+                    }
+                }
+            }
+        }
+    }
+    OsString::from("az")
+}
+
 pub(crate) struct Azure {
     pub(crate) target: Target,
     pub(crate) timeout: Duration,
@@ -33,7 +51,7 @@ impl Azure {
         query: &[String],
         body: Option<&Value>,
     ) -> Result<Value> {
-        let mut command = Command::new("az");
+        let mut command = Command::new(az_program());
         command.args([
             "devops",
             "invoke",
@@ -75,9 +93,14 @@ impl Azure {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null());
-        let mut child = command
-            .spawn()
-            .context("Cannot start az; install Azure CLI and azure-devops extension")?;
+        let mut child = command.spawn().map_err(|error| {
+            let message = if error.kind() == ErrorKind::NotFound {
+                "Azure CLI (az) not found in PATH; install Azure CLI or restart the terminal"
+            } else {
+                "Cannot start Azure CLI (az)"
+            };
+            anyhow::Error::new(error).context(message)
+        })?;
         let mut stdout = child.stdout.take().context("No stdout pipe")?;
         let mut stderr = child.stderr.take().context("No stderr pipe")?;
         // Drain both pipes while waiting: timelines can exceed OS pipe capacity.
@@ -139,7 +162,7 @@ impl Api for Azure {
                 .append_pair("api-version", "7.1")
                 .append_pair("$top", "1")
                 .append_pair("includeSourceChange", "true");
-            let mut command = Command::new("az");
+            let mut command = Command::new(az_program());
             command.args([
                 "rest",
                 "--method",
