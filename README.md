@@ -47,8 +47,11 @@ az-pipeline-watch 'https://dev.azure.com/ORG/PROJECT/_build/results?buildId=123'
 Supplying a URL without approval flags is read-only. Status refreshes every
 30 seconds in place in an interactive terminal; redirected output is plain text.
 The status shows watcher uptime, time until the next refresh, and pipeline
-duration from Azure DevOps start/finish timestamps. Timers update live while
-waiting in a terminal, without extra API calls; redirected output includes a
+duration from Azure DevOps start/finish timestamps. Timers update live both
+between and during refreshes in a terminal, without extra API calls.
+During a refresh, `Next refresh: now` is shown and pipeline duration uses the
+last received timestamps; before the first response, pipeline duration is `-`.
+Redirected output includes a
 snapshot per poll. Pipeline duration is `-` when the required timestamps are
 unavailable (for example, before the run starts).
 The stage selector and status output also show the pipeline name, run number,
@@ -61,20 +64,26 @@ line; repository IDs are used when names are absent, as with GitHub builds.
 Source commit metadata is read using `az rest` with the existing Azure CLI login.
 Missing metadata is displayed as `-`.
 
-While waiting between polling cycles:
+While monitoring, including during a refresh:
 
 | Key | Action |
 | --- | --- |
-| `r` | Refresh immediately |
+| `r` | Refresh immediately when idle; ignored during an active refresh |
 | `+` or `=` | Decrease the interval by 5 seconds, down to 1 second |
 | `-` | Increase the interval by 5 seconds, up to 3,600 seconds |
-| `Ctrl-C` | Stop monitoring |
+| `Ctrl-C` | Request monitoring to stop |
 
 While monitoring, press Esc twice within one second or Ctrl-C once to exit.
 A single Esc does not stop monitoring; any other key resets the double-Esc sequence.
 `q` still asks for confirmation. In the stage selector, `Esc`, `q`, and `Ctrl-C`
 ask before exiting. Press `y` to exit; `n`, Enter, or Esc resumes the current view.
 Non-interactive termination, errors, and completed runs do not prompt.
+Only one refresh runs at a time. The next interval starts when the current
+refresh finishes; `+`/`-` during a refresh change that next interval.
+Exit requests respond immediately in the UI, but wait for the current Azure CLI
+call and verification of any submitted approval to finish. No further polling
+or approvals are started after stopping, and failed or uncertain writes are
+never retried automatically. The `q` confirmation keeps timers running.
 
 ```bash
 # Inspect stages and existing approval status without submitting votes.

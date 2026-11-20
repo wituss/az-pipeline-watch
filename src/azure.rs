@@ -5,6 +5,10 @@ use std::{
     ffi::OsString,
     io::{ErrorKind, Read, Write},
     process::{Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -40,6 +44,7 @@ fn az_program() -> OsString {
 pub(crate) struct Azure {
     pub(crate) target: Target,
     pub(crate) timeout: Duration,
+    pub(crate) stopped: Arc<AtomicBool>,
 }
 
 impl Azure {
@@ -152,7 +157,9 @@ impl Api for Azure {
         )?;
         let mut build: Build = serde_json::from_value(value)?;
         ensure!(build.id == self.target.build_id, "Build ID mismatch");
-        if let Some(version) = &build.source_version {
+        if !self.stopped.load(Ordering::Relaxed)
+            && let Some(version) = &build.source_version
+        {
             let mut url = url::Url::parse(&self.target.organization)?;
             url.path_segments_mut()
                 .map_err(|_| anyhow::anyhow!("Invalid organization URL"))?

@@ -17,7 +17,6 @@ pub(crate) fn cycle(
     api: &impl Api,
     policy: &Policy,
     dry_run: bool,
-    refresh_screen: bool,
     refresh_interval: Option<u64>,
     show_controls: bool,
     watcher_started: Instant,
@@ -26,7 +25,11 @@ pub(crate) fn cycle(
     stopped: &AtomicBool,
 ) -> Result<(Build, WatchDisplay)> {
     let build = api.build()?;
-    let records = api.timeline()?;
+    let records = if stopped.load(Ordering::Relaxed) {
+        Vec::new()
+    } else {
+        api.timeline()?
+    };
     let mut output = String::new();
     writeln!(output, "Approval policy: {policy:?}; dry-run: {dry_run}")
         .expect("writing to a String cannot fail");
@@ -54,6 +57,8 @@ pub(crate) fn cycle(
             None
         },
         escape_pending: false,
+        exit_pending: false,
+        stopping: false,
     };
     let output = &mut display.pipeline;
     let mut stages: Vec<_> = records.iter().filter(|r| r.kind == "Stage").collect();
@@ -81,9 +86,11 @@ pub(crate) fn cycle(
         )
         .expect("writing to a String cannot fail");
     }
+    if stopped.load(Ordering::Relaxed) {
+        return Ok((build, display));
+    }
     let selected_stages = policy.selected_stages(&records)?;
     if build.status == "completed" || build.status == "cancelling" {
-        display.render(refresh_screen)?;
         return Ok((build, display));
     }
     for (id, stage) in approval_stages(&records, false)? {
@@ -113,7 +120,14 @@ pub(crate) fn cycle(
             continue;
         }
         // Recheck immediately before writing; errors or uncertainty stop the watcher.
-        if api.build()?.status != "inProgress" || !api.approval(&id)?.actionable() {
+        if stopped.load(Ordering::Relaxed) {
+            break;
+        }
+        let current_build = api.build()?;
+        if stopped.load(Ordering::Relaxed) {
+            break;
+        }
+        if current_build.status != "inProgress" || !api.approval(&id)?.actionable() {
             writeln!(output, "  Approval/build changed; leaving {id} untouched.")
                 .expect("writing to a String cannot fail");
             continue;
@@ -148,6 +162,5 @@ pub(crate) fn cycle(
         )
         .expect("writing to a String cannot fail");
     }
-    display.render(refresh_screen)?;
     Ok((build, display))
 }

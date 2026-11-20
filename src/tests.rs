@@ -159,6 +159,21 @@ fn section_frames_wrap_long_lines_and_preserve_unicode_display_width() {
 }
 
 #[test]
+fn timers_show_now_while_refreshing() {
+    let build = Fake::default().build().unwrap();
+    assert!(
+        timer_line(
+            &build,
+            Duration::from_secs(2),
+            Some(Duration::ZERO),
+            SystemTime::now(),
+        )
+        .unwrap()
+        .contains("Watcher: 00:00:02 | Next refresh: now")
+    );
+}
+
+#[test]
 fn timers_use_build_timestamps_and_keep_completed_duration_fixed() {
     let start: SystemTime = "2026-11-04T08:00:00Z"
         .parse::<chrono::DateTime<chrono::Utc>>()
@@ -366,7 +381,6 @@ fn tick(
         api,
         policy,
         dry_run,
-        false,
         Some(30),
         false,
         Instant::now(),
@@ -440,7 +454,6 @@ fn all_can_include_production_but_stopping_prevents_writes() {
     cycle(
         &api,
         &Policy::All,
-        false,
         false,
         Some(30),
         false,

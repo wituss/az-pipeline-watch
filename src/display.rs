@@ -21,6 +21,8 @@ pub(crate) struct WatchDisplay {
     pub(crate) timers: String,
     pub(crate) controls_interval: Option<u64>,
     pub(crate) escape_pending: bool,
+    pub(crate) exit_pending: bool,
+    pub(crate) stopping: bool,
 }
 
 impl WatchDisplay {
@@ -35,6 +37,12 @@ impl WatchDisplay {
             timers.push_str(
                 "\nPress Esc again within one second to exit; Ctrl-C exits immediately.\n",
             );
+        }
+        if self.exit_pending {
+            timers.push_str("\nAre you sure you want to exit? [y/N]: \n");
+        }
+        if self.stopping {
+            timers.push_str("\nStopping monitoring; waiting for the current Azure operation and any approval verification.\n");
         }
         let frame = format!(
             "{}{}{}",
@@ -213,6 +221,9 @@ pub(crate) fn timer_line(
     let next = next_refresh
         .filter(|_| build.status != "completed")
         .map(|remaining| {
+            if remaining.is_zero() {
+                return "now".into();
+            }
             // Round up so the countdown does not show zero before polling starts.
             format!(
                 "{}s",

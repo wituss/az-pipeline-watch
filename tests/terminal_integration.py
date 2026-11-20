@@ -33,9 +33,11 @@ URL = b"https://dev.azure.com/org/project/_build/results?buildId=123\n"
 
 
 class TerminalSession:
-    def __init__(self, *flags, api_error=False):
+    def __init__(self, *flags, api_error=False, delay_resource=None):
         self.directory = tempfile.TemporaryDirectory(prefix="watch-integration-")
         self.root = Path(self.directory.name)
+        if delay_resource:
+            self.delay_call(delay_resource)
         fixture = (Path(__file__).parent / "fixtures" / "az").resolve()
         if os.name == "nt":
             # Real Azure CLI on Windows is a batch file, not an executable.
@@ -168,8 +170,141 @@ class TerminalSession:
     def request_exit(self):
         self.send(b"\x03")
 
+    def delay_call(self, resource, patch=False):
+        (self.root / "delay.json").write_text(
+            json.dumps({"resource": resource, "patch": patch}))
+
+    def wait_for_delayed_call(self):
+        deadline = time.monotonic() + 5
+        while not (self.root / "delay-started").exists():
+            if time.monotonic() >= deadline:
+                raise AssertionError("Azure call was not delayed")
+            self.read()
+
+    def release_call(self):
+        (self.root / "delay-release").write_text("release")
+
 
 class TerminalIntegrationTests(unittest.TestCase):
+    def test_refresh_timers_and_keyboard_work_during_delayed_call(self):
+        with TerminalSession(URL.decode().strip(), "--interval", "30") as session:
+            session.expect("Next refresh: 30s")
+            session.delay_call("builds")
+            session.send(b"r")
+            session.expect("Next refresh: now")
+            session.wait_for_delayed_call()
+            calls = (session.root / "calls.jsonl").read_text()
+            start = session.position
+            deadline = time.monotonic() + 2.2
+            while time.monotonic() < deadline:
+                session.read()
+            frames = session.output[start:]
+            watcher = re.findall(rb"Watcher: (\d+):(\d+):(\d+)", frames)
+            pipeline = re.findall(rb"Pipeline: (\d+):(\d+):(\d+)", frames)
+            self.assertGreaterEqual(len(set(watcher)), 2)
+            self.assertGreaterEqual(len(set(pipeline)), 2)
+            self.assertNotRegex(frames, rb"Next refresh: \d+s")
+            session.send(b"rrr+")
+            session.expect("Refresh interval: 25s")
+            session.send(b"-")
+            session.expect("Refresh interval: 30s")
+            session.send(b"+q")
+            session.expect("Are you sure you want to exit?")
+            # Confirmation is a UI state, not a blocking input loop.
+            start = session.position
+            deadline = time.monotonic() + 1.2
+            while time.monotonic() < deadline:
+                session.read()
+            self.assertIn(b"Next refresh: now", session.output[start:])
+            session.send(b"n")
+            session.expect("Next refresh: now")
+            self.assertEqual((session.root / "calls.jsonl").read_text(), calls)
+            session.release_call()
+            session.expect("Next refresh: 25s")
+            calls = (session.root / "calls.jsonl").read_text()
+            session.expect("Next refresh: 24s")
+            self.assertEqual((session.root / "calls.jsonl").read_text(), calls)
+            session.request_exit()
+            session.finish()
+            self.assertEqual(session.votes(), [])
+
+    def test_initial_refresh_remains_responsive_and_stops_before_next_read(self):
+        with TerminalSession(URL.decode().strip(), "--interval", "30",
+                             delay_resource="builds") as session:
+            session.wait_for_delayed_call()
+            session.expect("Next refresh: now | Pipeline: -")
+            session.request_exit()
+            session.expect("Stopping monitoring; waiting")
+            self.assertTrue(session.alive())
+            calls = (session.root / "calls.jsonl").read_text()
+            session.release_call()
+            session.expect("Monitoring stopped.")
+            session.finish()
+            self.assertEqual((session.root / "calls.jsonl").read_text(), calls)
+
+    def test_two_escapes_work_during_refresh(self):
+        with TerminalSession(URL.decode().strip(), "--interval", "30") as session:
+            session.expect("Next refresh: 30s")
+            session.delay_call("timeline")
+            session.send(b"r")
+            session.wait_for_delayed_call()
+            session.send(b"\x1b")
+            session.expect("Press Esc again within one second")
+            session.send(b"\x1b")
+            session.expect("Stopping monitoring; waiting")
+            session.release_call()
+            session.finish()
+            self.assertEqual(session.votes(), [])
+
+    def test_delayed_error_is_reported_after_stop(self):
+        with TerminalSession(URL.decode().strip(), "--interval", "30",
+                             api_error=True) as session:
+            session.expect("Next refresh: 30s")
+            session.delay_call("timeline")
+            session.send(b"r")
+            session.wait_for_delayed_call()
+            session.request_exit()
+            session.expect("Stopping monitoring; waiting")
+            session.release_call()
+            session.expect("Simulated Azure API failure")
+            session.finish(expected_code=1)
+
+    def test_stopping_during_patch_still_verifies_vote(self):
+        with TerminalSession("--interval", "30") as session:
+            session.choose_uat()
+            session.delay_call("approvals", patch=True)
+            session.send(b"approve\n")
+            session.wait_for_delayed_call()
+            session.request_exit()
+            session.expect("Stopping monitoring; waiting")
+            session.release_call()
+            session.expect("Confirmed approval vote for UAT")
+            session.finish()
+            self.assertEqual(
+                [vote["approvalId"] for vote in session.votes()], ["UAT-approval"])
+            calls = [json.loads(line) for line in
+                     (session.root / "calls.jsonl").read_text().splitlines()]
+            patch_index = next(i for i, call in enumerate(calls)
+                               if "--http-method" in call)
+            self.assertEqual(len(calls[patch_index + 1:]), 1)
+            self.assertIn("approvalIds=UAT-approval", calls[-1])
+
+    def test_confirmed_q_during_approval_read_prevents_patch(self):
+        with TerminalSession("--interval", "30") as session:
+            session.choose_uat()
+            session.delay_call("approvals")
+            session.send(b"approve\n")
+            session.wait_for_delayed_call()
+            session.send(b"q")
+            session.expect("Are you sure you want to exit?")
+            session.send(b"y")
+            session.expect("Stopping monitoring; waiting")
+            calls = (session.root / "calls.jsonl").read_text()
+            session.release_call()
+            session.finish()
+            self.assertEqual((session.root / "calls.jsonl").read_text(), calls)
+            self.assertEqual(session.votes(), [])
+
     def test_selects_pending_stage_and_approves_only_uat(self):
         with TerminalSession("--interval", "1") as session:
             session.choose_uat()

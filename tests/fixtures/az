@@ -4,6 +4,7 @@
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,6 +14,18 @@ args = sys.argv[1:]
 resource = "source-change" if args[0] == "rest" else args[args.index("--resource") + 1]
 with (root / "calls.jsonl").open("a") as log:
     log.write(json.dumps(args) + "\n")
+
+delay = root / "delay.json"
+if delay.exists() and not (root / "delay-started").exists():
+    config = json.loads(delay.read_text())
+    if resource == config["resource"] and ("--http-method" in args) == config["patch"]:
+        (root / "delay-started").write_text("started")
+        deadline = time.monotonic() + 10
+        while not (root / "delay-release").exists():
+            if time.monotonic() >= deadline:
+                print("Test did not release delayed Azure call", file=sys.stderr)
+                sys.exit(1)
+            time.sleep(0.02)
 
 if resource == "builds":
     start = root / "start-time"
